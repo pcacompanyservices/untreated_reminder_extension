@@ -42,6 +42,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // ===== Core logic =====
 async function handleTimeCheckpoint_(force = false) {
   const now = new Date();
+  const day = now.getDay();
+  if (!force && (day === 0 || day === 6)) { console.log('[PCA] Weekend; skip'); return; }
   if (!force && now.getHours() < TARGET_HOUR) { console.log('[PCA] Before 4pm; skip'); return; }
 
   const todayKey = getTodayKey_();
@@ -49,7 +51,7 @@ async function handleTimeCheckpoint_(force = false) {
   const stored = await chrome.storage.local.get(ackKey);
   if (!force && stored[ackKey]) { console.log('[PCA] Already acknowledged today; skip'); return; }
 
-  // Optional debug: whose token/profile?
+  // Debug: whose token/profile?
   try {
     const info = await chrome.identity.getProfileUserInfo();
     console.log('[PCA] Token/profile email:', info.email || '(unknown)');
