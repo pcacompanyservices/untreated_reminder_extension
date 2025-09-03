@@ -6,8 +6,12 @@ const TARGET_HOUR = 16;
     chrome.runtime.sendMessage({ type: 'CHECK_AND_MAYBE_SHOW' });
   }
   // Listen for background trigger (from 4pm alarm or manual click)
+  let lastModalAuto = false;
   chrome.runtime.onMessage.addListener(msg => {
-    if (msg?.type === 'SHOW_MODAL') showModal_(msg.count);
+    if (msg?.type === 'SHOW_MODAL') {
+      lastModalAuto = !!msg.auto;
+      showModal_(msg.count);
+    }
   });
 })();
 
@@ -72,7 +76,9 @@ function showModal_(count) {
 
   document.getElementById('pca-ack-btn').addEventListener('click', () => {
     overlay.remove();
-    chrome.runtime.sendMessage({ type: 'ACK_TODAY' });
+    if (lastModalAuto) {
+      chrome.runtime.sendMessage({ type: 'ACK_TODAY' });
+    }
   }, { once: true });
 }
 

@@ -61,17 +61,17 @@ async function handleTimeCheckpoint_(force = false) {
   console.log('[PCA] _UNTREATED (threads overdue >24h) =', count);
 
   if (count > 0) {
-    await notifyGmailTabs_(count);
+    await notifyGmailTabs_(count, !force);
   } else {
     console.log('[PCA] No untreated overdue >24h; nothing to show');
   }
 }
 
-async function notifyGmailTabs_(count) {
+async function notifyGmailTabs_(count, auto) {
   const tabs = await chrome.tabs.query({ url: 'https://mail.google.com/*' });
   console.log('[PCA] Notifying tabs:', tabs.length);
   for (const tab of tabs) {
-    const ok = await sendMessageOrInject_(tab.id, { type: 'SHOW_MODAL', count });
+    const ok = await sendMessageOrInject_(tab.id, { type: 'SHOW_MODAL', count, auto });
     if (!ok) console.warn('[PCA] Could not contact tab', tab.id);
   }
 }
