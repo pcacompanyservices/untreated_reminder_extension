@@ -34,7 +34,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.type === 'ACK_TODAY') {
     const todayKey = getTodayKey_();
     const ackKey = `${ACK_KEY_PREFIX}${todayKey}`;
-    chrome.storage.local.set({ [ackKey]: true }, () => sendResponse({ ok: true }));
+    chrome.storage.local.set({ [ackKey]: true }, async () => {
+      // Broadcast CLOSE_MODAL to all Gmail tabs
+      const tabs = await chrome.tabs.query({ url: 'https://mail.google.com/*' });
+      for (const tab of tabs) {
+        chrome.tabs.sendMessage(tab.id, { type: 'CLOSE_MODAL' });
+      }
+      sendResponse({ ok: true });
+    });
     return true;
   }
 });

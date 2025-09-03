@@ -12,6 +12,10 @@ const TARGET_HOUR = 16;
       lastModalAuto = !!msg.auto;
       showModal_(msg.count);
     }
+    if (msg?.type === 'CLOSE_MODAL') {
+      const overlay = document.getElementById('pca-untreated-overlay');
+      if (overlay) overlay.remove();
+    }
   });
 })();
 
