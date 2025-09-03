@@ -31,14 +31,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       .catch(e => { console.error('[PCA] check error', e); sendResponse({ ok: false, err: String(e) }); });
     return true; // async
   }
+  if (msg?.type === 'CLOSE_ALL_MODALS') {
+    (async () => {
+      const tabs = await chrome.tabs.query({ url: 'https://mail.google.com/*' });
+      for (const tab of tabs) {
+        await sendMessageOrInject_(tab.id, { type: 'CLOSE_MODAL' });
+      }
+      sendResponse({ ok: true });
+    })();
+    return true;
+  }
   if (msg?.type === 'ACK_TODAY') {
     const todayKey = getTodayKey_();
     const ackKey = `${ACK_KEY_PREFIX}${todayKey}`;
     chrome.storage.local.set({ [ackKey]: true }, async () => {
-      // Broadcast CLOSE_MODAL to all Gmail tabs
+      // Broadcast CLOSE_MODAL to all Gmail tabs using sendMessageOrInject_ for reliability
       const tabs = await chrome.tabs.query({ url: 'https://mail.google.com/*' });
       for (const tab of tabs) {
-        chrome.tabs.sendMessage(tab.id, { type: 'CLOSE_MODAL' });
+        await sendMessageOrInject_(tab.id, { type: 'CLOSE_MODAL' });
       }
       sendResponse({ ok: true });
     });

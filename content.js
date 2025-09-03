@@ -1,25 +1,43 @@
 const TARGET_HOUR = 16;
 
 (function init() {
-  // On Gmail load, if it's after 4pm, ask background to check and maybe show
+  // On Gmail load, if it's after 4pm, check today's ACK first to avoid duplicate popups on reload
   if (new Date().getHours() >= TARGET_HOUR) {
-    chrome.runtime.sendMessage({ type: 'CHECK_AND_MAYBE_SHOW' });
+    const d = new Date();
+    const todayKey = `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
+    const ackKey = `ack-${todayKey}`;
+    chrome.storage.local.get(ackKey, store => {
+      if (!store[ackKey]) {
+        chrome.runtime.sendMessage({ type: 'CHECK_AND_MAYBE_SHOW' });
+      }
+    });
   }
+  // Precompute today's ack key for listeners below
+  const d0 = new Date();
+  const todayKey0 = `${d0.getFullYear()}${String(d0.getMonth()+1).padStart(2,'0')}${String(d0.getDate()).padStart(2,'0')}`;
+  const ackKey0 = `ack-${todayKey0}`;
+
   // Listen for background trigger (from 4pm alarm or manual click)
-  let lastModalAuto = false;
   chrome.runtime.onMessage.addListener(msg => {
     if (msg?.type === 'SHOW_MODAL') {
-      lastModalAuto = !!msg.auto;
-      showModal_(msg.count);
+      showModal_(msg.count, !!msg.auto);
     }
     if (msg?.type === 'CLOSE_MODAL') {
       const overlay = document.getElementById('pca-untreated-overlay');
       if (overlay) overlay.remove();
     }
   });
+
+  // Also listen to storage changes so any tab acknowledging closes others
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && changes[ackKey0]?.newValue) {
+      const overlay = document.getElementById('pca-untreated-overlay');
+      if (overlay) overlay.remove();
+    }
+  });
 })();
 
-function showModal_(count) {
+function showModal_(count, isAuto) {
   if (document.getElementById('pca-untreated-overlay')) return; // avoid duplicates
 
   const overlay = document.createElement('div');
@@ -56,7 +74,7 @@ function showModal_(count) {
       Tính đến ${stamp}, bạn có ${count} email chưa được xử lý trong hơn 24h. Vui lòng xử lý ngay.
     </p>
     <div id="pca-btn-row" style="display:flex; gap:12px; justify-content:center; align-items:center;">
-      <button id="pca-ack-btn" style="
+      <button id="pca-ack-btn" data-auto="${isAuto ? 'true' : 'false'}" style="
         padding:10px 20px;
         border:none;
         border-radius:10px;
@@ -78,9 +96,13 @@ function showModal_(count) {
   overlay.appendChild(box);
   document.documentElement.appendChild(overlay);
 
-  document.getElementById('pca-ack-btn').addEventListener('click', () => {
+  const ackBtn = document.getElementById('pca-ack-btn');
+  ackBtn.addEventListener('click', () => {
     overlay.remove();
-    if (lastModalAuto) {
+    // Always request closing modals in other tabs
+    chrome.runtime.sendMessage({ type: 'CLOSE_ALL_MODALS' });
+    // Only count acknowledgment when auto-triggered
+    if (ackBtn.dataset.auto === 'true') {
       chrome.runtime.sendMessage({ type: 'ACK_TODAY' });
     }
   }, { once: true });
