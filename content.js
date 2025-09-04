@@ -1,17 +1,17 @@
-const TARGET_HOUR = 16;
-
 (function init() {
-  // On Gmail load, if it's after 4pm, check today's ACK first to avoid duplicate popups on reload
-  if (new Date().getHours() >= TARGET_HOUR) {
-    const d = new Date();
-    const todayKey = `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
-    const ackKey = `ack-${todayKey}`;
-    chrome.storage.local.get(ackKey, store => {
-      if (!store[ackKey]) {
-        chrome.runtime.sendMessage({ type: 'CHECK_AND_MAYBE_SHOW' });
-      }
-    });
-  }
+  // Avoid double-injection (programmatic + manifest) causing redeclarations
+  if (window.__PCA_CONTENT_LOADED__) return;
+  window.__PCA_CONTENT_LOADED__ = true;
+
+  // On Gmail load, ask background to decide (time/weekend/ack). Quick pre-check avoids duplicate popups on reload
+  const d = new Date();
+  const todayKey = `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
+  const ackKey = `ack-${todayKey}`;
+  chrome.storage.local.get(ackKey, store => {
+    if (!store[ackKey]) {
+      chrome.runtime.sendMessage({ type: 'CHECK_AND_MAYBE_SHOW' });
+    }
+  });
   // Precompute today's ack key for listeners below
   const d0 = new Date();
   const todayKey0 = `${d0.getFullYear()}${String(d0.getMonth()+1).padStart(2,'0')}${String(d0.getDate()).padStart(2,'0')}`;
@@ -35,9 +35,7 @@ const TARGET_HOUR = 16;
       if (overlay) overlay.remove();
     }
   });
-})();
-
-function showModal_(count, isAuto) {
+  function showModal_(count, isAuto) {
   if (document.getElementById('pca-untreated-overlay')) return; // avoid duplicates
 
   const overlay = document.createElement('div');
@@ -106,9 +104,9 @@ function showModal_(count, isAuto) {
       chrome.runtime.sendMessage({ type: 'ACK_TODAY' });
     }
   }, { once: true });
-}
+  }
 
-function buildTimestamp_() {
+  function buildTimestamp_() {
   const d = new Date();
   const dd = String(d.getDate()).padStart(2, '0');
   const mm = String(d.getMonth() + 1).padStart(2, '0');
@@ -116,4 +114,5 @@ function buildTimestamp_() {
   const hh = String(d.getHours()).padStart(2, '0');
   const min = String(d.getMinutes()).padStart(2, '0');
   return `${dd}/${mm}/${yyyy} ${hh}h${min}`;
-}
+  }
+})();

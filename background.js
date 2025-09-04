@@ -1,16 +1,30 @@
 // ===== Settings =====
 const LABEL_NAME = '_UNTREATED';
-const TARGET_HOUR = 16; // 4pm local time
+const TARGET_HOUR = 10; // 4pm local time
 const ACK_KEY_PREFIX = 'ack-'; // ack-YYYYMMDD
 
 console.log('[PCA] SW loaded. Ext ID:', chrome.runtime.id);
 
+// Set toolbar icon from local photo
+function setActionIcon_() {
+  try {
+    chrome.action.setIcon({
+      path: {
+        16: 'pca_cropped_logo.png',
+        32: 'pca_cropped_logo.png'
+      }
+    });
+  } catch (e) {
+    console.warn('[PCA] setActionIcon failed', e);
+  }
+}
+
 // Schedule the daily 4pm alarm
-chrome.runtime.onInstalled.addListener(scheduleNextAlarm_);
-chrome.runtime.onStartup.addListener(scheduleNextAlarm_);
+chrome.runtime.onInstalled.addListener(() => { setActionIcon_(); scheduleNextAlarm_(); });
+chrome.runtime.onStartup.addListener(() => { setActionIcon_(); scheduleNextAlarm_(); });
 chrome.alarms.onAlarm.addListener(a => {
   if (a.name === 'daily-ack') {
-    console.log('[PCA] 4pm alarm fired');
+  console.log('[PCA] Alarm fired at', new Date().toString());
     handleTimeCheckpoint_();
     scheduleNextAlarm_();
   }
@@ -18,7 +32,7 @@ chrome.alarms.onAlarm.addListener(a => {
 
 // Toolbar icon: force a check (and guarantee consent UI)
 chrome.action.onClicked.addListener(async () => {
-  console.log('[PCA] Action clicked → forcing check');
+  console.log('[PCA] Action clicked: forcing check');
   await ensureTokenInteractive_(); // shows consent if needed
   handleTimeCheckpoint_(/*force=*/true);
 });
@@ -61,7 +75,7 @@ async function handleTimeCheckpoint_(force = false) {
   const now = new Date();
   const day = now.getDay();
   if (!force && (day === 0 || day === 6)) { console.log('[PCA] Weekend; skip'); return; }
-  if (!force && now.getHours() < TARGET_HOUR) { console.log('[PCA] Before 4pm; skip'); return; }
+  if (!force && now.getHours() < TARGET_HOUR) { console.log(`[PCA] Before target hour (${TARGET_HOUR}); skip`); return; }
 
   const todayKey = getTodayKey_();
   const ackKey = `${ACK_KEY_PREFIX}${todayKey}`;
@@ -127,7 +141,7 @@ function scheduleNextAlarm_() {
   when.setHours(TARGET_HOUR, 0, 0, 0);
   if (when <= now) when.setDate(when.getDate() + 1);
   chrome.alarms.create('daily-ack', { when: when.getTime() });
-  console.log('[PCA] Next 4pm alarm at', when.toString());
+  console.log('[PCA] Next alarm scheduled at', when.toString());
 }
 
 function getTodayKey_() {
