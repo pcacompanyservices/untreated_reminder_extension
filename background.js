@@ -1,6 +1,6 @@
 // ===== Settings =====
 const LABEL_NAME = '_UNTREATED';
-const TARGET_HOUR = 10; // 4pm local time
+const TARGET_HOUR = 16; // 4pm local time
 const ACK_KEY_PREFIX = 'ack-'; // ack-YYYYMMDD
 
 console.log('[PCA] SW loaded. Ext ID:', chrome.runtime.id);
