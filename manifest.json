@@ -12,7 +12,7 @@
   },
   "host_permissions": ["https://mail.google.com/*", "https://www.googleapis.com/*"],
   "oauth2": {
-    "client_id": "554448492971-p007qepsor7eecdk8n3dlaijhcpbfind.apps.googleusercontent.com",
+    "client_id": "554448492971-68ou2qi48556bkrirbv78bd85tolntcd.apps.googleusercontent.com",
     "scopes": ["https://www.googleapis.com/auth/gmail.readonly"]
   },
   "background": { "service_worker": "background.js" },
