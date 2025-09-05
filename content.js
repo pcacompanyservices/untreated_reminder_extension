@@ -7,8 +7,9 @@
   const d = new Date();
   const todayKey = `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
   const ackKey = `ack-${todayKey}`;
-  chrome.storage.local.get(ackKey, store => {
-    if (!store[ackKey]) {
+  const ignoreKey = `ignore-${todayKey}`;
+  chrome.storage.local.get([ackKey, ignoreKey], store => {
+    if (!store[ackKey] && !store[ignoreKey]) {
       chrome.runtime.sendMessage({ type: 'CHECK_AND_MAYBE_SHOW' });
     }
   });
@@ -20,7 +21,7 @@
   // Listen for background trigger (from 4pm alarm or manual click)
   chrome.runtime.onMessage.addListener(msg => {
     if (msg?.type === 'SHOW_MODAL') {
-      showModal_(msg.count, !!msg.auto);
+      showModal_(msg.count, !!msg.auto, msg.dateKey);
     }
     if (msg?.type === 'CLOSE_MODAL') {
       const overlay = document.getElementById('pca-untreated-overlay');
@@ -35,7 +36,7 @@
       if (overlay) overlay.remove();
     }
   });
-  function showModal_(count, isAuto) {
+  function showModal_(count, isAuto, dateKey) {
   if (document.getElementById('pca-untreated-overlay')) return; // avoid duplicates
 
   const overlay = document.createElement('div');
@@ -72,7 +73,7 @@
       Tính đến ${stamp}, bạn có ${count} email chưa được xử lý trong hơn 24h. Vui lòng xử lý ngay.
     </p>
     <div id="pca-btn-row" style="display:flex; gap:12px; justify-content:center; align-items:center;">
-      <button id="pca-ack-btn" data-auto="${isAuto ? 'true' : 'false'}" style="
+  <button id="pca-ack-btn" data-auto="${isAuto ? 'true' : 'false'}" data-date="${dateKey || ''}" style="
         padding:10px 20px;
         border:none;
         border-radius:10px;
@@ -101,7 +102,8 @@
     chrome.runtime.sendMessage({ type: 'CLOSE_ALL_MODALS' });
     // Only count acknowledgment when auto-triggered
     if (ackBtn.dataset.auto === 'true') {
-      chrome.runtime.sendMessage({ type: 'ACK_TODAY' });
+      const dateKey = ackBtn.dataset.date;
+      chrome.runtime.sendMessage({ type: 'ACK_DATE', dateKey });
     }
   }, { once: true });
   }
