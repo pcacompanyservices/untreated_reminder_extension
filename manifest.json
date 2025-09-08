@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "PCA Untreated Reminder (Dev)",
+  "name": "PCA Untreated Reminder",
   "version": "1.0.3",
   "description": "Forces an acknowledgment after 4pm if _UNTREATED emails remain.",
   "permissions": ["identity", "storage", "tabs", "scripting", "alarms"],
