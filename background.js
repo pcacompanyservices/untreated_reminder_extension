@@ -102,6 +102,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     })();
     return true;
   }
+  if (msg?.type === 'GET_UNTREATED_COUNT') {
+    (async () => {
+      try {
+        const count = await getUntreatedCount_();
+        sendResponse({ ok: true, count });
+      } catch (e) {
+        console.warn('[PCA] GET_UNTREATED_COUNT failed', e);
+        sendResponse({ ok: false, err: String(e) });
+      }
+    })();
+    return true;
+  }
 });
 
 // ===== Core logic =====
