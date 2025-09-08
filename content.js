@@ -141,6 +141,7 @@
         display: 'none', // default hidden, shown only when count > 0
         alignItems: 'center',
         justifyContent: 'center',
+          flexDirection: 'column',
         padding: '8px 0',
         fontFamily: 'Arial, sans-serif',
         fontSize: '14px',
@@ -152,7 +153,10 @@
       host.insertBefore(banner, list);
     }
     if (count > 0) {
-      banner.textContent = `You have ${count} UNTREATED emails overdue by over 24 hours.`;
+      banner.innerHTML = `
+        <div>You have ${count} UNTREATED emails overdue by over 24 hours.</div>
+        <div style="font-weight:400; margin-top:2px;">Bạn có ${count} email chưa được xử lý trong hơn 24h.</div>
+      `;
       banner.style.display = 'flex';
       banner.style.color = '#C1272D';
       styleUntreatedLabel_(true);
