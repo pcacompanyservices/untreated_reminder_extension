@@ -6,6 +6,32 @@ const IGNORE_KEY_PREFIX = 'ignore-'; // ignore-YYYYMMDD when user didn't ack by 
 const PENDING_KEY = 'pending-ack-date'; // stores YYYYMMDD when auto modal was shown
 const ACK_DEADLINE_HOUR = 8; // Local hour when the next working day begins (ack deadline time)
 const GMAIL_URL_MATCH = 'https://mail.google.com/*';
+const TAB_EMAILS_KEY = 'tabMailboxEmails'; // maps tabId -> mailbox email captured from content script
+let cachedProfileEmail = null;
+let profileFetchAttempted = false;
+async function getProfileEmail_() {
+  if (cachedProfileEmail) return cachedProfileEmail;
+  try {
+    const token = await getToken_();
+    const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/profile?fields=emailAddress', {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    if (res.ok) {
+      const data = await res.json();
+      cachedProfileEmail = (data && data.emailAddress) ? data.emailAddress.toLowerCase() : null;
+      if (!profileFetchAttempted) {
+        console.log('[PCA] Profile email resolved:', cachedProfileEmail || '(null)');
+      }
+    } else if (!profileFetchAttempted) {
+      const txt = await res.text();
+      console.warn('[PCA] profile fetch failed', res.status, txt);
+    }
+  } catch (e) {
+    if (!profileFetchAttempted) console.warn('[PCA] getProfileEmail error', e);
+  }
+  profileFetchAttempted = true;
+  return cachedProfileEmail;
+}
 
 console.log('[PCA] SW loaded. Ext ID:', chrome.runtime.id);
 
@@ -54,13 +80,48 @@ chrome.alarms.onAlarm.addListener(a => {
 
 // Toolbar icon: force a check (and guarantee consent UI)
 chrome.action.onClicked.addListener(async () => {
-  console.log('[PCA] Action clicked: forcing check');
-  await ensureTokenInteractive_(); // shows consent if needed
+  console.log('[PCA] Action clicked');
+  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (activeTab && activeTab.url && activeTab.url.startsWith('https://mail.google.com/')) {
+    try {
+      const profile = await getProfileEmail_();
+      const st = await chrome.storage.local.get(TAB_EMAILS_KEY);
+      const map = st[TAB_EMAILS_KEY] || {};
+  const tabEmail = map[String(activeTab.id)];
+  console.log('[PCA] Action context profile=', profile || '(null)', 'tabEmail=', tabEmail || '(none)');
+      if (!tabEmail || !profile || tabEmail !== profile) {
+        try {
+          await chrome.scripting.executeScript({ target: { tabId: activeTab.id }, func: () => alert('This tool only works on the authorized internal mailbox for this Chrome profile.') });
+        } catch (e) { console.warn('[PCA] alert inject failed', e); }
+        return; // block feature when mismatch
+      }
+    } catch {}
+  }
+  await ensureTokenInteractive_();
   handleTimeCheckpoint_(/*force=*/true);
 });
 
 // From content script (on page load after 4pm)
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg?.type === 'MAILBOX_EMAIL' && sender.tab?.id != null) {
+    (async () => {
+      const email = (msg.email || '').toLowerCase();
+      let profile = await getProfileEmail_();
+      try {
+        const st = await chrome.storage.local.get(TAB_EMAILS_KEY);
+        const map = st[TAB_EMAILS_KEY] || {};
+        const existing = map[String(sender.tab.id)];
+        if (existing !== email) {
+          console.log('[PCA] Recorded mailbox email for tab', sender.tab.id, email, 'profile=', profile || '(null)');
+        }
+        map[String(sender.tab.id)] = email;
+        await chrome.storage.local.set({ [TAB_EMAILS_KEY]: map });
+      } catch {}
+      const match = !!profile && !!email && profile === email;
+      sendResponse({ ok: true, match, profile });
+    })();
+    return true; // async
+  }
   if (msg?.type === 'CHECK_AND_MAYBE_SHOW') {
     handleTimeCheckpoint_()
       .then(() => sendResponse({ ok: true }))
@@ -155,11 +216,17 @@ async function handleTimeCheckpoint_(force = false) {
 
 async function notifyGmailTabs_(count, auto, dateKey) {
   const tabs = await chrome.tabs.query({ url: GMAIL_URL_MATCH });
-  console.log('[PCA] Notifying tabs:', tabs.length);
+  const profile = await getProfileEmail_();
+  let stMap = {};
+  try { const st = await chrome.storage.local.get(TAB_EMAILS_KEY); stMap = st[TAB_EMAILS_KEY] || {}; } catch {}
+  let matched = 0, skipped = 0;
   for (const tab of tabs) {
+    const tabEmail = stMap[String(tab.id)];
+    if (!profile || !tabEmail || tabEmail !== profile) { skipped++; continue; }
     const ok = await sendMessageOrInject_(tab.id, { type: 'SHOW_MODAL', count, auto, dateKey });
-    if (!ok) console.warn('[PCA] Could not contact tab', tab.id);
+    if (!ok) console.warn('[PCA] Could not contact tab', tab.id); else matched++;
   }
+  console.log(`[PCA] Notified tabs matched=${matched} skipped=${skipped}`);
 }
 
 // Try sending to the tab; if no listener, inject content.js, then resend.
@@ -298,10 +365,23 @@ function formatShortDateTime_(dt) {
 // Close any open modals across Gmail tabs
 async function closeAllGmailModals_() {
   const tabs = await chrome.tabs.query({ url: GMAIL_URL_MATCH });
+  const profile = await getProfileEmail_();
+  let stMap = {};
+  try { const st = await chrome.storage.local.get(TAB_EMAILS_KEY); stMap = st[TAB_EMAILS_KEY] || {}; } catch {}
   for (const tab of tabs) {
+    const tabEmail = stMap[String(tab.id)];
+    if (!profile || !tabEmail || tabEmail !== profile) continue;
     await sendMessageOrInject_(tab.id, { type: 'CLOSE_MODAL' });
   }
 }
+
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+  try {
+    const st = await chrome.storage.local.get(TAB_EMAILS_KEY);
+    const map = st[TAB_EMAILS_KEY] || {};
+    if (map[String(tabId)]) { delete map[String(tabId)]; await chrome.storage.local.set({ [TAB_EMAILS_KEY]: map }); }
+  } catch {}
+});
 
 // ===== OAuth helpers =====
 async function ensureTokenInteractive_() {
