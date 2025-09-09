@@ -6,6 +6,77 @@
   // Keep _UNTREATED label icon and text in PCA red in the Gmail UI (left navigation)
   const PCA_RED = '#C1272D';
   const NUM_RE = /^\d{1,3}(,\d{3})*$/; // matches numbers like 1, 12, 250, 2,345, 12,345,678
+  let mailboxMatchAllowed = false; // becomes true only if mailbox email == profile email
+  let lastMailboxEmailSent = null; // prevent redundant MAILBOX_EMAIL messages
+  let mailboxActivationDone = false;
+
+  function activateAfterMatch_() {
+    if (!mailboxMatchAllowed || mailboxActivationDone) return;
+    mailboxActivationDone = true;
+    // Run banner + styling attempts now that we are allowed
+    try { ensureBanner_(); } catch {}
+    try { styleUntreatedLabel_(gUntreatedCount > 0); } catch {}
+    // Re-run daily check precondition (ACK modal) in case we missed initial window
+    const dAct = new Date();
+    const todayKeyAct = `${dAct.getFullYear()}${String(dAct.getMonth()+1).padStart(2,'0')}${String(dAct.getDate()).padStart(2,'0')}`;
+    const ackKeyAct = `ack-${todayKeyAct}`;
+    const ignoreKeyAct = `ignore-${todayKeyAct}`;
+    chrome.storage.local.get([ackKeyAct, ignoreKeyAct], store => {
+      if (!store[ackKeyAct] && !store[ignoreKeyAct]) {
+        chrome.runtime.sendMessage({ type: 'CHECK_AND_MAYBE_SHOW' });
+      }
+    });
+  }
+
+  // Extract current mailbox email heuristically from Gmail DOM
+  function detectMailboxEmail_() {
+    try {
+      // Strategy 1: Look for account switcher img alt or div[aria-label] containing email
+      const candidate = document.querySelector('a[aria-label*="@"], div[aria-label*="@"], img[aria-label*="@"]');
+      const aria = candidate && (candidate.getAttribute('aria-label') || '');
+      if (aria && /[A-Z0-9._%+-]+@[A-Z0-9.-]+/i.test(aria)) {
+        const m = aria.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+/i);
+        if (m) return m[0].toLowerCase();
+      }
+      // Strategy 2: Look for span elements containing an email pattern (common in header avatar tooltip)
+      const spans = Array.from(document.querySelectorAll('span'));
+      for (const s of spans) {
+        const txt = (s.textContent || '').trim();
+        if (/^[A-Z0-9._%+-]+@[A-Z0-9.-]+$/i.test(txt)) return txt.toLowerCase();
+      }
+    } catch {}
+    return null;
+  }
+
+  async function initMailboxBinding_() {
+    const email = detectMailboxEmail_();
+    if (!email) return; // Try again later via observer below
+    if (email === lastMailboxEmailSent) return; // already reported
+    try {
+      const resp = await chrome.runtime.sendMessage({ type: 'MAILBOX_EMAIL', email });
+      if (resp && resp.ok) {
+        const prev = mailboxMatchAllowed;
+        mailboxMatchAllowed = !!resp.match;
+        lastMailboxEmailSent = email;
+        if (mailboxMatchAllowed && !prev) {
+          activateAfterMatch_();
+        }
+      }
+    } catch {}
+  }
+
+  // Observe for initial mailbox email appearance (Gmail loads async)
+  const mailboxObserver = new MutationObserver(() => {
+    if (!mailboxMatchAllowed) {
+      const found = detectMailboxEmail_();
+      if (found) {
+        initMailboxBinding_();
+      }
+    }
+  });
+  mailboxObserver.observe(document.documentElement, { subtree: true, childList: true, attributes: true });
+  // Kick initial attempt
+  setTimeout(initMailboxBinding_, 400);
   let navObserver;
   let gUntreatedCount = 0; // updated from background
   const styleUntreatedLabel_ = (shouldStyle) => {
@@ -117,6 +188,7 @@
   // --- Top banner: "You have ... UNTREATED emails" in PCA red, centered ---
   const BANNER_ID = 'pca-untreated-banner';
   const ensureBanner_ = async () => {
+    if (!mailboxMatchAllowed) return; // deactivated for this mailbox
     // Ask background for latest count
     let count = 0;
     try {
@@ -141,8 +213,11 @@
         display: 'none', // default hidden, shown only when count > 0
         alignItems: 'center',
         justifyContent: 'center',
-          flexDirection: 'column',
-        padding: '8px 0',
+        flexDirection: 'column',
+        padding: '2px 0 4px', // tighter vertical padding
+        margin: '0',
+        lineHeight: '1.15',
+        gap: '1px',
         fontFamily: 'Arial, sans-serif',
         fontSize: '14px',
         color: '#C1272D',
@@ -154,8 +229,8 @@
     }
     if (count > 0) {
       banner.innerHTML = `
-        <div>You have ${count} UNTREATED emails overdue by over 24 hours.</div>
-        <div style="font-weight:400; margin-top:2px;">Bạn có ${count} email chưa được xử lý trong hơn 24h.</div>
+        <div style="margin:0;">You have ${count} UNTREATED emails overdue by over 24 hours.</div>
+        <div style="font-weight:400; margin-top:1px; margin-bottom:0;">Bạn có ${count} email chưa được xử lý trong hơn 24h.</div>
       `;
       banner.style.display = 'flex';
       banner.style.color = '#C1272D';
@@ -188,6 +263,7 @@
   const ackKey = `ack-${todayKey}`;
   const ignoreKey = `ignore-${todayKey}`;
   chrome.storage.local.get([ackKey, ignoreKey], store => {
+    if (!mailboxMatchAllowed) return; // will retry on activation
     if (!store[ackKey] && !store[ignoreKey]) {
       chrome.runtime.sendMessage({ type: 'CHECK_AND_MAYBE_SHOW' });
     }
@@ -196,6 +272,7 @@
 
   // Listen for background trigger (from 4pm alarm or manual click)
   chrome.runtime.onMessage.addListener(msg => {
+    if (!mailboxMatchAllowed) return; // ignore all runtime messages when mismatched
     if (msg?.type === 'SHOW_MODAL') {
       showModal_(msg.count, !!msg.auto, msg.dateKey);
     }
@@ -207,12 +284,14 @@
 
   // Also listen to storage changes so any tab acknowledging closes others
   chrome.storage.onChanged.addListener((changes, area) => {
+    if (!mailboxMatchAllowed) return;
     if (area === 'local' && changes[ackKey]?.newValue) {
       const overlay = document.getElementById('pca-untreated-overlay');
       if (overlay) overlay.remove();
     }
   });
   function showModal_(count, isAuto, dateKey) {
+  if (!mailboxMatchAllowed) return; // mismatch: never show
   if (document.getElementById('pca-untreated-overlay')) return; // avoid duplicates
 
   const overlay = document.createElement('div');
