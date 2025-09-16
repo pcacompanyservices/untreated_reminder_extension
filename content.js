@@ -83,10 +83,10 @@
   const styleSpecialLabels_ = () => {
     if (!mailboxMatchAllowed) return;
     const LABEL_STYLES = {
-      '_UNTREATED': { color: '#C1272D', fontWeight: '700' },
-      '_Processing': { color: '#E86C1A', fontWeight: '700' },
-      '_Follow-up': { color: '#E6C01A', fontWeight: '700' },
-      '_No action': { color: '#888', fontWeight: '400' }
+      '_UNTREATED': { color: '#C1272D', fontWeight: '700', badge: '#C1272D' },
+      '_Processing': { color: '#E86C1A', fontWeight: '700', badge: '#E86C1A' },
+      '_Follow-up': { color: '#E6C01A', fontWeight: '700', badge: '#E6C01A' },
+      '_No action': { color: '#888', fontWeight: '400', badge: null }
     };
     for (const [label, style] of Object.entries(LABEL_STYLES)) {
       let anchors = Array.from(document.querySelectorAll(`a[href*="#label/${label}"], a[title="${label}"], a[aria-label="${label}"]`));
@@ -98,8 +98,8 @@
           a.style.setProperty('color', style.color, 'important');
           a.style.setProperty('font-weight', style.fontWeight, 'important');
         } catch {}
-        // Special badge for _UNTREATED count
-        if (label === '_UNTREATED') {
+        // Special badge for _UNTREATED, _Processing, _Follow-up
+        if (style.badge) {
           const row = a.closest('[role="listitem"], tr, div');
           if (row) {
             const nodes = Array.from(row.querySelectorAll('span, div'))
@@ -110,7 +110,7 @@
               if (NUM_RE.test(txt)) {
                 try {
                   el.style.setProperty('color', '#FFFFFF', 'important');
-                  el.style.setProperty('background-color', '#C1272D', 'important');
+                  el.style.setProperty('background-color', style.badge, 'important');
                   el.style.setProperty('font-weight', '700', 'important');
                   el.style.setProperty('border-radius', '999px', 'important');
                   el.style.setProperty('padding', '0 8px', 'important');
