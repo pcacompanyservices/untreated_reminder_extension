@@ -445,20 +445,21 @@ async function getLabelIdByName_(name) {
 async function getUntreatedCount_() {
   const token = await getToken_();
   const labelId = await getLabelIdByName_(LABEL_NAME);
-  if (!labelId) return 0; // label not present yet
+  if (!labelId) return 0;
 
-  let total = 0;
+  let overdueCount = 0;
   let pageToken;
+  const now = Date.now();
+  const DAY_MS = 24 * 60 * 60 * 1000;
 
   do {
     const base = 'https://gmail.googleapis.com/gmail/v1/users/me/threads';
     const params = new URLSearchParams({
-      maxResults: '500',
+      maxResults: '100',
       labelIds: labelId,
-      q: 'older_than:1d -in:trash -in:spam' // overdue > 24 hours
+      q: '-in:trash -in:spam'
     });
     if (pageToken) params.set('pageToken', pageToken);
-
     const url = `${base}?${params.toString()}&fields=nextPageToken,threads/id`;
     const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
     if (!res.ok) {
@@ -477,9 +478,39 @@ async function getUntreatedCount_() {
     } catch (e) {
       console.warn('[PCA] threads.list JSON parse error', e);
     }
-    total += Array.isArray(data.threads) ? data.threads.length : 0;
+    const threads = Array.isArray(data.threads) ? data.threads : [];
+    for (const thread of threads) {
+      try {
+        // Fetch thread messages (metadata only for speed)
+        const tRes = await fetch(
+          `https://gmail.googleapis.com/gmail/v1/users/me/threads/${thread.id}?fields=messages/internalDate`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        if (!tRes.ok) continue;
+        let tData = {};
+        try {
+          const ct = tRes.headers.get('content-type') || '';
+          if (ct.includes('application/json')) {
+            tData = await tRes.json();
+          } else {
+            const txt = await tRes.text();
+            if (txt.trim()) console.warn('[PCA] thread.get non-JSON response:', txt);
+          }
+        } catch (e) {
+          console.warn('[PCA] thread.get JSON parse error', e);
+        }
+        const messages = Array.isArray(tData.messages) ? tData.messages : [];
+        if (messages.length === 0) continue;
+        // Find the most recent message
+        const newest = messages[messages.length - 1];
+        const msgDate = Number(newest.internalDate);
+        if (now - msgDate > DAY_MS) overdueCount++;
+      } catch (e) {
+        console.warn('[PCA] thread scan error', e);
+      }
+    }
     pageToken = data.nextPageToken;
   } while (pageToken);
 
-  return total; // exact thread count (overdue >24h)
+  return overdueCount;
 }
