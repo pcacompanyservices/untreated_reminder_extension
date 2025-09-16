@@ -79,32 +79,28 @@
   setTimeout(initMailboxBinding_, 400);
   let navObserver;
   let gUntreatedCount = 0; // updated from background
-  const styleUntreatedLabel_ = (shouldStyle) => {
-    try {
-      // Prefer anchor with label href; fall back to text match
-      let anchors = Array.from(document.querySelectorAll('a[href*="#label/_UNTREATED"], a[title="_UNTREATED"], a[aria-label="_UNTREATED"]'));
+  // Style all special labels regardless of overdue count
+  const styleSpecialLabels_ = () => {
+    if (!mailboxMatchAllowed) return;
+    const LABEL_STYLES = {
+      '_UNTREATED': { color: '#C1272D', fontWeight: '700', badge: '#C1272D' },
+      '_Processing': { color: '#E86C1A', fontWeight: '700', badge: '#E86C1A' },
+      '_Follow-up': { color: '#E6C01A', fontWeight: '700', badge: '#E6C01A' },
+      '_No action': { color: '#888', fontWeight: '400', badge: null }
+    };
+    for (const [label, style] of Object.entries(LABEL_STYLES)) {
+      let anchors = Array.from(document.querySelectorAll(`a[href*="#label/${label}"], a[title="${label}"], a[aria-label="${label}"]`));
       if (anchors.length === 0) {
-        anchors = Array.from(document.querySelectorAll('a')).filter(a => (a.textContent || '').trim() === '_UNTREATED');
+        anchors = Array.from(document.querySelectorAll('a')).filter(a => (a.textContent || '').trim() === label);
       }
       for (const a of anchors) {
-        const row = a.closest('[role="listitem"], tr, div');
-        // Cleanup: if any previous version forced icon styles, remove them to let Gmail's color setting apply
-        const prevIcons = a.querySelectorAll('[data-pca-icon-styled]');
-        prevIcons.forEach(el => {
-          try { el.style.removeProperty('background-color'); } catch {}
-          try { el.style.removeProperty('border-color'); } catch {}
-          try { el.style.removeProperty('fill'); } catch {}
-          try { el.style.removeProperty('stroke'); } catch {}
-          el.removeAttribute('data-pca-icon-styled');
-          if (el.dataset) delete el.dataset.pcaIconStyled;
-        });
-
-        if (shouldStyle) {
-          // Label text (re-assert every pass while active)
-          try { a.style.setProperty('color', PCA_RED, 'important'); } catch {}
-          a.dataset.pcaStyled = '1';
-
-          // Right-aligned numeric count
+        try {
+          a.style.setProperty('color', style.color, 'important');
+          a.style.setProperty('font-weight', style.fontWeight, 'important');
+        } catch {}
+        // Special badge for _UNTREATED, _Processing, _Follow-up
+        if (style.badge) {
+          const row = a.closest('[role="listitem"], tr, div');
           if (row) {
             const nodes = Array.from(row.querySelectorAll('span, div'))
               .filter(el => !a.contains(el) && !el.dataset.pcaCountStyled);
@@ -113,9 +109,8 @@
               if (!txt) continue;
               if (NUM_RE.test(txt)) {
                 try {
-                  // Badge style: white text on PCA red background, centered
                   el.style.setProperty('color', '#FFFFFF', 'important');
-                  el.style.setProperty('background-color', PCA_RED, 'important');
+                  el.style.setProperty('background-color', style.badge, 'important');
                   el.style.setProperty('font-weight', '700', 'important');
                   el.style.setProperty('border-radius', '999px', 'important');
                   el.style.setProperty('padding', '0 8px', 'important');
@@ -133,36 +128,9 @@
               }
             }
           }
-        } else {
-          // Remove text/count styling only; keep icon enforced red
-          if (a.dataset.pcaStyled) {
-            try { a.style.removeProperty('color'); } catch {}
-            a.removeAttribute('data-pca-styled');
-            delete a.dataset.pcaStyled;
-          }
-          if (row) {
-            const prev = row.querySelectorAll('[data-pca-count-styled]');
-            prev.forEach(el => {
-              try { el.style.removeProperty('color'); } catch {}
-              try { el.style.removeProperty('background-color'); } catch {}
-              try { el.style.removeProperty('font-weight'); } catch {}
-              try { el.style.removeProperty('border-radius'); } catch {}
-              try { el.style.removeProperty('padding'); } catch {}
-              try { el.style.removeProperty('min-width'); } catch {}
-              try { el.style.removeProperty('height'); } catch {}
-              try { el.style.removeProperty('display'); } catch {}
-              try { el.style.removeProperty('align-items'); } catch {}
-              try { el.style.removeProperty('justify-content'); } catch {}
-              try { el.style.removeProperty('text-align'); } catch {}
-              try { el.style.removeProperty('line-height'); } catch {}
-              try { el.style.removeProperty('vertical-align'); } catch {}
-              el.removeAttribute('data-pca-count-styled');
-              if (el.dataset) delete el.dataset.pcaCountStyled;
-            });
-          }
         }
       }
-    } catch {}
+    }
   };
   const setupNavObserver_ = () => {
     if (navObserver) return;
@@ -171,7 +139,7 @@
     let timer;
     navObserver = new MutationObserver(() => {
       clearTimeout(timer);
-      timer = setTimeout(() => styleUntreatedLabel_(gUntreatedCount > 0), 150);
+      timer = setTimeout(() => styleSpecialLabels_(), 150);
     });
     navObserver.observe(target, {
       subtree: true,
@@ -180,7 +148,7 @@
       attributeFilter: ['style', 'class', 'color']
     });
     // Initial attempt
-    styleUntreatedLabel_(gUntreatedCount > 0);
+    styleSpecialLabels_();
   };
   // Defer slightly to allow Gmail to render initial UI
   setTimeout(setupNavObserver_, 600);
@@ -201,7 +169,7 @@
     const list = document.querySelector('div[role="main"]');
     if (!list || !list.parentElement) {
       // Still update left nav styling based on count
-      styleUntreatedLabel_(gUntreatedCount > 0);
+      styleSpecialLabels_();
       return;
     }
     const host = list.parentElement;
@@ -234,10 +202,10 @@
       `;
       banner.style.display = 'flex';
       banner.style.color = '#C1272D';
-      styleUntreatedLabel_(true);
+      styleSpecialLabels_();
     } else {
       banner.style.display = 'none';
-      styleUntreatedLabel_(false);
+      styleSpecialLabels_();
     }
   };
 
