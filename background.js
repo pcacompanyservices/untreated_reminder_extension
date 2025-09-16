@@ -418,7 +418,18 @@ async function getLabelIdByName_(name) {
     { headers: { Authorization: `Bearer ${token}` } }
   );
   if (!res.ok) throw new Error('labels.list failed');
-  const data = await res.json();
+  let data = {};
+  try {
+    const ct = res.headers.get('content-type') || '';
+    if (ct.includes('application/json')) {
+      data = await res.json();
+    } else {
+      const txt = await res.text();
+      if (txt.trim()) console.warn('[PCA] labels.list non-JSON response:', txt);
+    }
+  } catch (e) {
+    console.warn('[PCA] labels.list JSON parse error', e);
+  }
   const found = (data.labels || []).find(l => l.name === name);
   const id = found ? found.id : null;
 
@@ -454,7 +465,18 @@ async function getUntreatedCount_() {
       const txt = await res.text();
       throw new Error(`threads.list failed: ${res.status} ${txt}`);
     }
-    const data = await res.json();
+    let data = {};
+    try {
+      const ct = res.headers.get('content-type') || '';
+      if (ct.includes('application/json')) {
+        data = await res.json();
+      } else {
+        const txt = await res.text();
+        if (txt.trim()) console.warn('[PCA] threads.list non-JSON response:', txt);
+      }
+    } catch (e) {
+      console.warn('[PCA] threads.list JSON parse error', e);
+    }
     total += Array.isArray(data.threads) ? data.threads.length : 0;
     pageToken = data.nextPageToken;
   } while (pageToken);
