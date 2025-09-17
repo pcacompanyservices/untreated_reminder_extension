@@ -9,31 +9,111 @@ const GMAIL_URL_MATCH = 'https://mail.google.com/*';
 const TAB_EMAILS_KEY = 'tabMailboxEmails'; // maps tabId -> mailbox email captured from content script
 let cachedProfileEmail = null;
 let profileFetchAttempted = false;
+let profileFetchPromise = null; // de-dupe concurrent fetches
+let profileBackoffUntil = 0; // epoch ms until which we should not refetch after 429
+let profileCacheLoaded = false; // ensure we load persisted cache once
+
 async function getProfileEmail_() {
-  if (cachedProfileEmail) return cachedProfileEmail;
-  try {
-    const token = await getToken_();
-    const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/profile?fields=emailAddress', {
-      headers: { Authorization: `Bearer ${token}` }
-    });
-    if (res.ok) {
-      const data = await res.json();
-      cachedProfileEmail = (data && data.emailAddress) ? data.emailAddress.toLowerCase() : null;
-      if (!profileFetchAttempted) {
-        console.log('[PCA] Profile email resolved:', cachedProfileEmail || '(null)');
+  // Load cache from storage once (survives SW restarts)
+  if (!profileCacheLoaded) {
+    try {
+      const st = await chrome.storage.local.get(['profileEmailCache', 'profileBackoffUntil']);
+      if (typeof st.profileBackoffUntil === 'number') profileBackoffUntil = st.profileBackoffUntil;
+      if (typeof st.profileEmailCache === 'string' && st.profileEmailCache) {
+        cachedProfileEmail = st.profileEmailCache.toLowerCase();
       }
-    } else if (!profileFetchAttempted) {
-      const txt = await res.text();
-      console.warn('[PCA] profile fetch failed', res.status, txt);
-    }
-  } catch (e) {
-    if (!profileFetchAttempted) console.warn('[PCA] getProfileEmail error', e);
+    } catch {}
+    profileCacheLoaded = true;
   }
-  profileFetchAttempted = true;
-  return cachedProfileEmail;
+
+  if (cachedProfileEmail) return cachedProfileEmail;
+  if (Date.now() < profileBackoffUntil) {
+    // Still in backoff window, avoid hammering the API
+    return null;
+  }
+  if (profileFetchPromise) return profileFetchPromise;
+
+  profileFetchPromise = (async () => {
+    try {
+      const token = await getToken_();
+      const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/profile?fields=emailAddress', {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (res.ok) {
+        let data = {};
+        try { data = await res.json(); } catch {}
+        cachedProfileEmail = (data && data.emailAddress) ? String(data.emailAddress).toLowerCase() : null;
+        try { await chrome.storage.local.set({ profileEmailCache: cachedProfileEmail || '' }); } catch {}
+        if (!profileFetchAttempted) {
+          console.log('[PCA] Profile email resolved:', cachedProfileEmail || '(null)');
+        }
+        return cachedProfileEmail;
+      }
+
+      // Handle 429 backoff explicitly
+      if (res.status === 429) {
+        let retryAtMs = 0;
+        const retryHdr = res.headers.get('retry-after');
+        if (retryHdr) {
+          const secs = Number(retryHdr);
+          if (!Number.isNaN(secs) && secs > 0) retryAtMs = Date.now() + secs * 1000;
+          else {
+            const t = Date.parse(retryHdr);
+            if (!Number.isNaN(t)) retryAtMs = t;
+          }
+        }
+        if (!retryAtMs) {
+          try {
+            const bodyText = await res.text();
+            // Attempt to extract ISO datetime from error message
+            const m = bodyText.match(/Retry after\s+([0-9T:\-.Z+]+)/i);
+            if (m && m[1]) {
+              const t = Date.parse(m[1]);
+              if (!Number.isNaN(t)) retryAtMs = t;
+            }
+            if (!retryAtMs && bodyText.trim()) console.warn('[PCA] profile 429 body:', bodyText);
+          } catch {}
+        }
+        // Fallback: 2 minutes backoff if not provided
+        if (!retryAtMs) retryAtMs = Date.now() + 2 * 60 * 1000;
+        profileBackoffUntil = retryAtMs;
+        try { await chrome.storage.local.set({ profileBackoffUntil: profileBackoffUntil }); } catch {}
+        if (!profileFetchAttempted) console.warn('[PCA] profile fetch 429; backoff until', new Date(profileBackoffUntil).toISOString());
+        return null;
+      }
+
+      // Other non-OK statuses
+      if (!profileFetchAttempted) {
+        let txt = '';
+        try { txt = await res.text(); } catch {}
+        console.warn('[PCA] profile fetch failed', res.status, txt);
+      }
+      return null;
+    } catch (e) {
+      if (!profileFetchAttempted) console.warn('[PCA] getProfileEmail error', e);
+      return null;
+    } finally {
+      profileFetchAttempted = true;
+      profileFetchPromise = null;
+    }
+  })();
+
+  return profileFetchPromise;
 }
 
 console.log('[PCA] SW loaded. Ext ID:', chrome.runtime.id);
+
+// Clear profile cache when sign-in state changes
+try {
+  chrome.identity.onSignInChanged.addListener(async () => {
+    cachedProfileEmail = null;
+    profileFetchAttempted = false;
+    profileFetchPromise = null;
+    profileBackoffUntil = 0;
+    try { await chrome.storage.local.remove(['profileEmailCache', 'profileBackoffUntil']); } catch {}
+    console.log('[PCA] Sign-in changed: cleared profile cache');
+  });
+} catch {}
 
 // Set toolbar icon from local photo
 function setActionIcon_() {
