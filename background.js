@@ -5,6 +5,8 @@ const ACK_KEY_PREFIX = 'ack-'; // ack-YYYYMMDD
 const IGNORE_KEY_PREFIX = 'ignore-'; // ignore-YYYYMMDD when user didn't ack by the acknowledgement deadline
 const PENDING_KEY = 'pending-ack-date'; // stores YYYYMMDD when auto modal was shown
 const ACK_DEADLINE_HOUR = 8; // Local hour when the next working day begins (ack deadline time)
+const WORK_START_HOUR = 8; // Working hours start (08:00 local)
+const WORK_END_HOUR = 18; // Working hours end (18:00 local, exclusive)
 const GMAIL_URL_MATCH = 'https://mail.google.com/*';
 const TAB_EMAILS_KEY = 'tabMailboxEmails'; // maps tabId -> mailbox email captured from content script
 let cachedProfileEmail = null;
@@ -12,6 +14,17 @@ let profileFetchAttempted = false;
 let profileFetchPromise = null; // de-dupe concurrent fetches
 let profileBackoffUntil = 0; // epoch ms until which we should not refetch after 429
 let profileCacheLoaded = false; // ensure we load persisted cache once
+let countBackoffUntil = 0; // epoch ms to pause exact count after 429
+let countBackoffLoaded = false;
+
+async function ensureCountBackoffLoaded_() {
+  if (countBackoffLoaded) return;
+  try {
+    const st = await chrome.storage.local.get(['countBackoffUntil']);
+    if (typeof st.countBackoffUntil === 'number') countBackoffUntil = st.countBackoffUntil;
+  } catch {}
+  countBackoffLoaded = true;
+}
 
 async function getProfileEmail_() {
   // Load cache from storage once (survives SW restarts)
@@ -110,7 +123,7 @@ try {
     profileFetchAttempted = false;
     profileFetchPromise = null;
     profileBackoffUntil = 0;
-    try { await chrome.storage.local.remove(['profileEmailCache', 'profileBackoffUntil']); } catch {}
+  try { await chrome.storage.local.remove(['profileEmailCache', 'profileBackoffUntil', 'untreatedCountCache', 'countBackoffUntil']); } catch {}
     console.log('[PCA] Sign-in changed: cleared profile cache');
   });
 } catch {}
@@ -129,14 +142,76 @@ function setActionIcon_() {
   }
 }
 
+function isGmailUrl_(url) {
+  return typeof url === 'string' && url.startsWith('https://mail.google.com/');
+}
+
+// Enable or disable the toolbar icon for a specific tab based on URL and mailbox/profile match
+async function updateActionStateForTab_(tabId, url) {
+  try {
+    if (!isGmailUrl_(url)) {
+      await chrome.action.disable(tabId);
+      await chrome.action.setTitle({ tabId, title: 'Inactive: open your authorized Gmail mailbox' });
+      return;
+    }
+    const profile = await getProfileEmail_();
+    const st = await chrome.storage.local.get(TAB_EMAILS_KEY);
+    const map = st[TAB_EMAILS_KEY] || {};
+    const tabEmail = map[String(tabId)];
+    const match = !!profile && !!tabEmail && profile === tabEmail;
+  await chrome.action.enable(tabId);
+  await chrome.action.setTitle({ tabId, title: match ? 'PCA Untreated Reminder – Force check' : 'Mailbox does not match this Chrome profile' });
+  } catch (e) {
+    // Best-effort: if any error, disable to be safe
+    try { await chrome.action.disable(tabId); } catch {}
+  }
+}
+
 // Schedule the daily target-hour alarm
-chrome.runtime.onInstalled.addListener(() => { setActionIcon_(); scheduleNextAlarm_(); runHousekeeping_(); });
-chrome.runtime.onStartup.addListener(() => { setActionIcon_(); scheduleNextAlarm_(); runHousekeeping_(); });
+chrome.runtime.onInstalled.addListener(() => { 
+  setActionIcon_(); 
+  scheduleNextAlarm_(); 
+  scheduleHourlyCount_(); 
+  runHousekeeping_(); 
+  // Seed cache once on install
+  const now = new Date();
+  if (!isWeekend_(now) && isWithinWorkingHours_(now)) {
+    refreshUntreatedCountCache_().catch(() => {});
+  }
+});
+chrome.runtime.onStartup.addListener(() => { 
+  setActionIcon_(); 
+  scheduleNextAlarm_(); 
+  scheduleHourlyCount_(); 
+  runHousekeeping_(); 
+  // Seed cache on startup so UI has an exact number without triggering heavy calls from content
+  const now = new Date();
+  if (!isWeekend_(now) && isWithinWorkingHours_(now)) {
+    refreshUntreatedCountCache_().catch(() => {});
+  }
+});
 chrome.alarms.onAlarm.addListener(a => {
   if (a.name === 'daily-ack') {
     console.log('[PCA] Alarm fired at', new Date().toString());
     handleTimeCheckpoint_();
     scheduleNextAlarm_();
+    return;
+  }
+  // Hourly refresh of exact _UNTREATED count cache
+  if (a.name === 'untreated-hourly') {
+    (async () => {
+      try {
+        const now = new Date();
+        if (!isWeekend_(now) && isWithinWorkingHours_(now)) {
+          await refreshUntreatedCountCache_();
+          await refreshBannersOnGmailTabs_();
+        } else {
+          // Skip refresh outside working hours/weekends
+        }
+      } catch (e) {
+        console.warn('[PCA] Hourly count refresh failed', e);
+      }
+    })();
     return;
   }
   // Handle acknowledgement deadline alarms (next working day at 08:00 local)
@@ -169,11 +244,13 @@ chrome.action.onClicked.addListener(async () => {
       const map = st[TAB_EMAILS_KEY] || {};
   const tabEmail = map[String(activeTab.id)];
   console.log('[PCA] Action context profile=', profile || '(null)', 'tabEmail=', tabEmail || '(none)');
-      if (!tabEmail || !profile || tabEmail !== profile) {
+      const match = !!profile && !!tabEmail && tabEmail === profile;
+      if (!match) {
+        // On mismatch, show the original info modal/alert and do nothing else
         try {
           await chrome.scripting.executeScript({ target: { tabId: activeTab.id }, func: () => alert('This tool only works on the authorized internal mailbox for this Chrome profile.') });
         } catch (e) { console.warn('[PCA] alert inject failed', e); }
-        return; // block feature when mismatch
+        return;
       }
     } catch {}
   }
@@ -198,6 +275,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         await chrome.storage.local.set({ [TAB_EMAILS_KEY]: map });
       } catch {}
       const match = !!profile && !!email && profile === email;
+  // Update action state for this tab immediately
+  try { await updateActionStateForTab_(sender.tab.id, sender.tab.url || ''); } catch {}
       sendResponse({ ok: true, match, profile });
     })();
     return true; // async
@@ -246,8 +325,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.type === 'GET_UNTREATED_COUNT') {
     (async () => {
       try {
-        const count = await getUntreatedCount_();
-        sendResponse({ ok: true, count });
+        const email = await getProfileEmail_();
+        let count = 0;
+        if (email) {
+          const cached = await readUntreatedCountCacheForEmail_(email);
+          if (typeof cached === 'number') count = cached;
+        }
+        sendResponse({ ok: true, count }); // content defaults to 0 when missing
       } catch (e) {
         console.warn('[PCA] GET_UNTREATED_COUNT failed', e);
         sendResponse({ ok: false, err: String(e) });
@@ -256,6 +340,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 });
+
+// Refresh action state when the active tab changes
+try {
+  chrome.tabs.onActivated.addListener(async ({ tabId }) => {
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      await updateActionStateForTab_(tabId, tab.url || '');
+    } catch {}
+  });
+} catch {}
+
+// Refresh action state when a tab is updated (URL changes, Gmail loads)
+try {
+  chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+    if (!changeInfo.url && changeInfo.status !== 'complete') return;
+    await updateActionStateForTab_(tabId, (changeInfo.url || tab.url || ''));
+  });
+} catch {}
 
 // ===== Core logic =====
 async function handleTimeCheckpoint_(force = false) {
@@ -277,8 +379,29 @@ async function handleTimeCheckpoint_(force = false) {
     console.log('[PCA] Token/profile email:', info.email || '(unknown)');
   } catch {}
 
-  const count = await getUntreatedCount_().catch(e => { console.error('[PCA] count failed', e); return 0; });
-  console.log('[PCA] _UNTREATED (threads overdue >24h) =', count);
+  let count = 0;
+  try {
+    count = await getUntreatedCount_({ exact: true });
+  } catch (e) {
+    console.warn('[PCA] exact count failed', e);
+    // Fallback: use cached exact (if any) and estimate to decide modal
+    const email = await getProfileEmail_();
+    let cached = 0;
+    if (email) {
+      const c = await readUntreatedCountCacheForEmail_(email);
+      if (typeof c === 'number') cached = c;
+    }
+    const estimate = await getUntreatedEstimate_().catch(() => 0);
+    // Prefer cached count for display; use estimate>0 to decide
+    count = cached;
+    if (estimate <= 0 && cached <= 0) {
+      console.log('[PCA] No _UNTREATED by estimate/cache; nothing to show');
+      return;
+    }
+  }
+  console.log('[PCA] _UNTREATED (threads exact) =', count);
+  // Ensure banner reflects the latest exact count
+  try { await refreshBannersOnGmailTabs_(); } catch {}
 
   if (count > 0) {
     const auto = !force;
@@ -290,23 +413,34 @@ async function handleTimeCheckpoint_(force = false) {
   await scheduleAckDeadlineAlarm_(todayKey);
     }
   } else {
-    console.log('[PCA] No untreated overdue >24h; nothing to show');
+  console.log('[PCA] No _UNTREATED threads; nothing to show');
   }
 }
 
 async function notifyGmailTabs_(count, auto, dateKey) {
-  const tabs = await chrome.tabs.query({ url: GMAIL_URL_MATCH });
-  const profile = await getProfileEmail_();
-  let stMap = {};
-  try { const st = await chrome.storage.local.get(TAB_EMAILS_KEY); stMap = st[TAB_EMAILS_KEY] || {}; } catch {}
-  let matched = 0, skipped = 0;
-  for (const tab of tabs) {
-    const tabEmail = stMap[String(tab.id)];
-    if (!profile || !tabEmail || tabEmail !== profile) { skipped++; continue; }
+  const { matchedTabs, skipped } = await getMatchedGmailTabs_();
+  let matched = 0;
+  for (const tab of matchedTabs) {
     const ok = await sendMessageOrInject_(tab.id, { type: 'SHOW_MODAL', count, auto, dateKey });
     if (!ok) console.warn('[PCA] Could not contact tab', tab.id); else matched++;
   }
   console.log(`[PCA] Notified tabs matched=${matched} skipped=${skipped}`);
+}
+
+// Ask matched Gmail tabs to refresh their banner (pulls cached exact count)
+async function refreshBannersOnGmailTabs_() {
+  const tabs = await chrome.tabs.query({ url: GMAIL_URL_MATCH });
+  const profile = await getProfileEmail_();
+  let stMap = {};
+  try { const st = await chrome.storage.local.get(TAB_EMAILS_KEY); stMap = st[TAB_EMAILS_KEY] || {}; } catch {}
+  let matched = 0;
+  for (const tab of tabs) {
+    const tabEmail = stMap[String(tab.id)];
+    if (!profile || !tabEmail || tabEmail !== profile) continue;
+    const ok = await sendMessageOrInject_(tab.id, { type: 'REFRESH_BANNER' });
+    if (ok) matched++;
+  }
+  if (matched) console.log(`[PCA] Banner refresh requested on ${matched} tab(s)`);
 }
 
 // Try sending to the tab; if no listener, inject content.js, then resend.
@@ -337,6 +471,30 @@ function trySend_(tabId, message) {
   });
 }
 
+async function getTabEmailsMap_() {
+  try {
+    const st = await chrome.storage.local.get(TAB_EMAILS_KEY);
+    return st[TAB_EMAILS_KEY] || {};
+  } catch {
+    return {};
+  }
+}
+
+// Returns { matchedTabs, skipped } where matchedTabs are Gmail tabs whose mailbox matches the profile
+async function getMatchedGmailTabs_() {
+  const tabs = await chrome.tabs.query({ url: GMAIL_URL_MATCH });
+  const profile = await getProfileEmail_();
+  const map = await getTabEmailsMap_();
+  const matchedTabs = [];
+  let skipped = 0;
+  for (const tab of tabs) {
+    const tabEmail = map[String(tab.id)];
+    if (!profile || !tabEmail || tabEmail !== profile) { skipped++; continue; }
+    matchedTabs.push(tab);
+  }
+  return { matchedTabs, skipped };
+}
+
 function scheduleNextAlarm_() {
   const now = new Date();
   const when = new Date(now);
@@ -349,6 +507,19 @@ function scheduleNextAlarm_() {
   }
   chrome.alarms.create('daily-ack', { when: when.getTime() });
   console.log('[PCA] Next alarm scheduled at', when.toString());
+}
+
+function scheduleHourlyCount_() {
+  try {
+    const now = new Date();
+    const next = new Date(now);
+    next.setMinutes(0, 0, 0); // top of the hour
+    if (next <= now) next.setHours(next.getHours() + 1);
+    chrome.alarms.create('untreated-hourly', { when: next.getTime(), periodInMinutes: 60 });
+    console.log('[PCA] Hourly count refresh scheduled at', next.toString());
+  } catch (e) {
+    console.warn('[PCA] scheduleHourlyCount failed', e);
+  }
 }
 
 async function scheduleAckDeadlineAlarm_(dateKey) {
@@ -439,18 +610,20 @@ function formatShortDateTime_(dt) {
   const yyyy = dt.getFullYear();
   const hh = String(dt.getHours()).padStart(2, '0');
   const min = String(dt.getMinutes()).padStart(2, '0');
-  return `${dd}/${mm}/${yyyy} ${hh}:${min}`;
+  // Return time first (24h) then date: "HH:MM DD/MM/YYYY"
+  return `${hh}:${min} ${dd}/${mm}/${yyyy}`;
+}
+
+// Working hours helper: true if local time within [WORK_START_HOUR, WORK_END_HOUR)
+function isWithinWorkingHours_(date) {
+  const h = date.getHours();
+  return h >= WORK_START_HOUR && h < WORK_END_HOUR;
 }
 
 // Close any open modals across Gmail tabs
 async function closeAllGmailModals_() {
-  const tabs = await chrome.tabs.query({ url: GMAIL_URL_MATCH });
-  const profile = await getProfileEmail_();
-  let stMap = {};
-  try { const st = await chrome.storage.local.get(TAB_EMAILS_KEY); stMap = st[TAB_EMAILS_KEY] || {}; } catch {}
-  for (const tab of tabs) {
-    const tabEmail = stMap[String(tab.id)];
-    if (!profile || !tabEmail || tabEmail !== profile) continue;
+  const { matchedTabs } = await getMatchedGmailTabs_();
+  for (const tab of matchedTabs) {
     await sendMessageOrInject_(tab.id, { type: 'CLOSE_MODAL' });
   }
 }
@@ -483,114 +656,158 @@ function getToken_() {
 
 // ===== Gmail helpers =====
 
-// Cache the label id so we can query by labelIds (faster & exact)
-async function getLabelIdByName_(name) {
-  const cacheKey = 'labelIdCache';
-  const token = await getToken_();
+// In-flight de-duplication for exact counting
+let untreatedCountInFlight = null; // Promise<{email, count}> or null
 
-  // Try cache first
-  const cache = await chrome.storage.local.get(cacheKey);
-  if (cache[cacheKey] && cache[cacheKey][name]) return cache[cacheKey][name];
-
-  // Fetch labels (id + name only)
-  const res = await fetch(
-    'https://gmail.googleapis.com/gmail/v1/users/me/labels?fields=labels(id,name)',
-    { headers: { Authorization: `Bearer ${token}` } }
-  );
-  if (!res.ok) throw new Error('labels.list failed');
-  let data = {};
-  try {
-    const ct = res.headers.get('content-type') || '';
-    if (ct.includes('application/json')) {
-      data = await res.json();
-    } else {
-      const txt = await res.text();
-      if (txt.trim()) console.warn('[PCA] labels.list non-JSON response:', txt);
-    }
-  } catch (e) {
-    console.warn('[PCA] labels.list JSON parse error', e);
+// Get _UNTREATED threads count with options:
+// - exact: if true, compute via pagination (accurate)
+// - useCache: if true, return cached value when available
+async function getUntreatedCount_(opts = {}) {
+  const { exact = false, useCache = true } = opts;
+  const email = await getProfileEmail_();
+  if (!email) {
+    // No profile/email known; best we can do is 0 (also prevents accidental cross-account cache use)
+    return 0;
   }
-  const found = (data.labels || []).find(l => l.name === name);
-  const id = found ? found.id : null;
 
-  // Update cache
-  const next = cache[cacheKey] || {};
-  next[name] = id;
-  await chrome.storage.local.set({ [cacheKey]: next });
+  // Try cache first when allowed
+  if (useCache) {
+    const cached = await readUntreatedCountCacheForEmail_(email);
+    if (cached != null && !exact) return cached;
+  }
 
-  return id;
+  // If an exact computation is already in-flight, share it
+  if (untreatedCountInFlight) {
+    try {
+      const res = await untreatedCountInFlight;
+      if (res && res.email === email) return res.count;
+    } catch {
+      // ignore and proceed to compute
+    }
+  }
+
+  // Compute exact count now
+  untreatedCountInFlight = (async () => {
+    const count = await getExactUntreatedCountFromApi_();
+    await writeUntreatedCountCacheForEmail_(email, count).catch(() => {});
+    return { email, count };
+  })();
+
+  try {
+    const res = await untreatedCountInFlight;
+    return res.count;
+  } finally {
+    untreatedCountInFlight = null;
+  }
 }
 
-// Exact thread count for label:_UNTREATED that are older than 24 hours (excludes trash/spam)
-async function getUntreatedCount_() {
+// Force refresh of cached exact count (used by hourly alarm)
+async function refreshUntreatedCountCache_() {
+  const email = await getProfileEmail_();
+  if (!email) return; // no-op when profile unknown or in backoff
+  const count = await getUntreatedCount_({ exact: true, useCache: false }).catch(async (e) => {
+    // On failure, keep existing cache; simply skip update
+    console.warn('[PCA] refresh cache skipped (exact failed)', e);
+    const c = await readUntreatedCountCacheForEmail_(email);
+    return typeof c === 'number' ? c : 0;
+  });
+  if (typeof count === 'number') {
+    await writeUntreatedCountCacheForEmail_(email, count);
+  }
+  console.log('[PCA] Hourly exact _UNTREATED count cached for', email, '=', count);
+}
+
+// Perform paginated threads.list to count all matching threads exactly
+async function getExactUntreatedCountFromApi_() {
+  await ensureCountBackoffLoaded_();
+  if (Date.now() < countBackoffUntil) {
+    throw new Error(`count-backoff-active-until:${new Date(countBackoffUntil).toISOString()}`);
+  }
   const token = await getToken_();
-  const labelId = await getLabelIdByName_(LABEL_NAME);
-  if (!labelId) return 0;
-
-  let overdueCount = 0;
+  let total = 0;
   let pageToken;
-  const now = Date.now();
-  const DAY_MS = 24 * 60 * 60 * 1000;
-
   do {
-    const base = 'https://gmail.googleapis.com/gmail/v1/users/me/threads';
-    const params = new URLSearchParams({
-      maxResults: '100',
-      labelIds: labelId,
-      q: '-in:trash -in:spam'
-    });
+    const params = new URLSearchParams({ maxResults: '500', q: `label:${LABEL_NAME} -in:trash -in:spam` });
     if (pageToken) params.set('pageToken', pageToken);
-    const url = `${base}?${params.toString()}&fields=nextPageToken,threads/id`;
+    // Only fetch minimal fields to reduce payload
+    const url = `https://gmail.googleapis.com/gmail/v1/users/me/threads?${params.toString()}&fields=nextPageToken,threads/id`;
     const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
     if (!res.ok) {
-      const txt = await res.text();
+      let txt = '';
+      try { txt = await res.text(); } catch {}
+      if (res.status === 429) {
+        // Parse retry-after and set backoff
+        let retryAtMs = 0;
+        try {
+          const hdr = res.headers.get('retry-after');
+          if (hdr) {
+            const secs = Number(hdr);
+            if (!Number.isNaN(secs) && secs > 0) retryAtMs = Date.now() + secs * 1000;
+            else {
+              const t = Date.parse(hdr);
+              if (!Number.isNaN(t)) retryAtMs = t;
+            }
+          }
+          if (!retryAtMs && txt) {
+            const m = txt.match(/Retry after\s+([0-9T:\-.Z+]+)/i);
+            if (m && m[1]) {
+              const t = Date.parse(m[1]);
+              if (!Number.isNaN(t)) retryAtMs = t;
+            }
+          }
+        } catch {}
+        if (!retryAtMs) retryAtMs = Date.now() + 2 * 60 * 1000; // default 2 min
+        countBackoffUntil = retryAtMs;
+        try { await chrome.storage.local.set({ countBackoffUntil }); } catch {}
+        throw new Error(`threads.list failed: 429 backoff-until ${new Date(retryAtMs).toISOString()}`);
+      }
       throw new Error(`threads.list failed: ${res.status} ${txt}`);
     }
     let data = {};
-    try {
-      const ct = res.headers.get('content-type') || '';
-      if (ct.includes('application/json')) {
-        data = await res.json();
-      } else {
-        const txt = await res.text();
-        if (txt.trim()) console.warn('[PCA] threads.list non-JSON response:', txt);
-      }
-    } catch (e) {
-      console.warn('[PCA] threads.list JSON parse error', e);
-    }
-    const threads = Array.isArray(data.threads) ? data.threads : [];
-    for (const thread of threads) {
-      try {
-        // Fetch thread messages (metadata only for speed)
-        const tRes = await fetch(
-          `https://gmail.googleapis.com/gmail/v1/users/me/threads/${thread.id}?fields=messages/internalDate`,
-          { headers: { Authorization: `Bearer ${token}` } }
-        );
-        if (!tRes.ok) continue;
-        let tData = {};
-        try {
-          const ct = tRes.headers.get('content-type') || '';
-          if (ct.includes('application/json')) {
-            tData = await tRes.json();
-          } else {
-            const txt = await tRes.text();
-            if (txt.trim()) console.warn('[PCA] thread.get non-JSON response:', txt);
-          }
-        } catch (e) {
-          console.warn('[PCA] thread.get JSON parse error', e);
-        }
-        const messages = Array.isArray(tData.messages) ? tData.messages : [];
-        if (messages.length === 0) continue;
-        // Find the most recent message
-        const newest = messages[messages.length - 1];
-        const msgDate = Number(newest.internalDate);
-        if (now - msgDate > DAY_MS) overdueCount++;
-      } catch (e) {
-        console.warn('[PCA] thread scan error', e);
-      }
-    }
+    try { data = await res.json(); } catch {}
+    const arr = Array.isArray(data.threads) ? data.threads : [];
+    total += arr.length;
     pageToken = data.nextPageToken;
   } while (pageToken);
+  return total;
+}
 
-  return overdueCount;
+// Low-cost estimate used as a fallback to decide presence of untreated items
+async function getUntreatedEstimate_() {
+  const token = await getToken_();
+  const params = new URLSearchParams({ maxResults: '1', q: `label:${LABEL_NAME} -in:trash -in:spam` });
+  const url = `https://gmail.googleapis.com/gmail/v1/users/me/threads?${params.toString()}&fields=resultSizeEstimate`;
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) return 0;
+  try {
+    const data = await res.json();
+    return Number(data.resultSizeEstimate) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+// Storage helpers for per-email cached counts
+async function readUntreatedCountCacheForEmail_(email) {
+  try {
+    const st = await chrome.storage.local.get('untreatedCountCache');
+    const cache = st.untreatedCountCache || {};
+    const entry = cache[email];
+    if (!entry) return null;
+    // Optional: could check staleness here if desired
+    return typeof entry.count === 'number' ? entry.count : null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeUntreatedCountCacheForEmail_(email, count) {
+  try {
+    const st = await chrome.storage.local.get('untreatedCountCache');
+    const cache = st.untreatedCountCache || {};
+    cache[email] = { count, ts: Date.now() };
+    await chrome.storage.local.set({ untreatedCountCache: cache });
+  } catch (e) {
+    console.warn('[PCA] Failed to write untreatedCountCache', e);
+  }
 }

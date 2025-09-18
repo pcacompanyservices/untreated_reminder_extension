@@ -197,8 +197,8 @@
     }
     if (count > 0) {
       banner.innerHTML = `
-        <div style="margin:0;">You have ${count} UNTREATED emails overdue by over 24 hours.</div>
-        <div style="font-weight:400; margin-top:1px; margin-bottom:0;">Bạn có ${count} email chưa được xử lý trong hơn 24h.</div>
+        <div style="margin:0;">You have ${count} UNTREATED email(s).</div>
+        <div style="font-weight:400; margin-top:1px; margin-bottom:0;">Bạn có ${count} email chưa được xử lý.</div>
       `;
       banner.style.display = 'flex';
       banner.style.color = '#C1272D';
@@ -240,9 +240,15 @@
 
   // Listen for background trigger (from 4pm alarm or manual click)
   chrome.runtime.onMessage.addListener(msg => {
-    if (!mailboxMatchAllowed) return; // ignore all runtime messages when mismatched
     if (msg?.type === 'SHOW_MODAL') {
-      showModal_(msg.count, !!msg.auto, msg.dateKey);
+      // Allow showing on mismatch only when explicitly forced by background
+      const allowMismatch = !!msg.allowMismatch;
+      if (!mailboxMatchAllowed && !allowMismatch) return;
+      showModal_(msg.count, !!msg.auto, msg.dateKey, allowMismatch);
+    }
+    if (msg?.type === 'REFRESH_BANNER') {
+      // Pull latest cached exact count and update banner
+      ensureBanner_();
     }
     if (msg?.type === 'CLOSE_MODAL') {
       const overlay = document.getElementById('pca-untreated-overlay');
@@ -258,8 +264,8 @@
       if (overlay) overlay.remove();
     }
   });
-  function showModal_(count, isAuto, dateKey) {
-  if (!mailboxMatchAllowed) return; // mismatch: never show
+  function showModal_(count, isAuto, dateKey, allowMismatch = false) {
+  if (!mailboxMatchAllowed && !allowMismatch) return; // mismatch: only show if forced
   if (document.getElementById('pca-untreated-overlay')) return; // avoid duplicates
 
   const overlay = document.createElement('div');
@@ -286,14 +292,14 @@
     textAlign: 'center' // center all text
   });
 
-  const stamp = buildTimestamp_(); // "DD/MM/YYYY HHhMM"
+  const stamp = buildTimestamp_(); // "HH:MM DD/MM/YYYY"
 
   box.innerHTML = `
     <p style="margin:0 0 6px 0; font-size:20px; font-weight:700;">
-      By ${stamp}, you have ${count} UNTREATED email(s) overdue by over 24 hours. Please treat them immediately.
+  By ${stamp}, you have ${count} UNTREATED email(s). Please treat them immediately.
     </p>
     <p style="margin:6px 0 20px 0; color:#444; font-size:18px;">
-      Tính đến ${stamp}, bạn có ${count} email chưa được xử lý trong hơn 24h. Vui lòng xử lý ngay.
+  Tính đến ${stamp}, bạn có ${count} email chưa được xử lý. Vui lòng xử lý ngay.
     </p>
     <div id="pca-btn-row" style="display:flex; gap:12px; justify-content:center; align-items:center;">
   <button id="pca-ack-btn" data-auto="${isAuto ? 'true' : 'false'}" data-date="${dateKey || ''}" style="
@@ -332,12 +338,13 @@
   }
 
   function buildTimestamp_() {
-  const d = new Date();
-  const dd = String(d.getDate()).padStart(2, '0');
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const yyyy = d.getFullYear();
-  const hh = String(d.getHours()).padStart(2, '0');
-  const min = String(d.getMinutes()).padStart(2, '0');
-  return `${dd}/${mm}/${yyyy} ${hh}h${min}`;
+    const d = new Date();
+    const dd = String(d.getDate()).padStart(2, '0');
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const yyyy = d.getFullYear();
+    const hh = String(d.getHours()).padStart(2, '0');
+    const min = String(d.getMinutes()).padStart(2, '0');
+    // Return time first (24h) then date: "HH:MM DD/MM/YYYY"
+    return `${hh}:${min} ${dd}/${mm}/${yyyy}`;
   }
 })();
