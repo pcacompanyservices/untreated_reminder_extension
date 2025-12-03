@@ -233,28 +233,47 @@ chrome.alarms.onAlarm.addListener(a => {
   }
 });
 
-// Toolbar icon: force a check (and guarantee consent UI)
+// Toolbar icon: force a check (and guarantee consent UI) - Option A: run interactive OAuth before Gmail/profile match check
 chrome.action.onClicked.addListener(async () => {
   console.log('[PCA] Action clicked');
+
+  // 1) Ensure OAuth grant first (may show the interactive consent popup)
+  try {
+    await ensureTokenInteractive_();
+  } catch (e) {
+    console.error('[PCA] ensureTokenInteractive_ failed:', e);
+    return; // Do not proceed if user denied or auth failed
+  }
+
+  // 2) After auth, perform Gmail/profile match check when on a Gmail tab
   const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (activeTab && activeTab.url && activeTab.url.startsWith('https://mail.google.com/')) {
     try {
       const profile = await getProfileEmail_();
       const st = await chrome.storage.local.get(TAB_EMAILS_KEY);
       const map = st[TAB_EMAILS_KEY] || {};
-  const tabEmail = map[String(activeTab.id)];
-  console.log('[PCA] Action context profile=', profile || '(null)', 'tabEmail=', tabEmail || '(none)');
+      const tabEmail = map[String(activeTab.id)];
+      console.log('[PCA] Action context profile=', profile || '(null)', 'tabEmail=', tabEmail || '(none)');
       const match = !!profile && !!tabEmail && tabEmail === profile;
       if (!match) {
         // On mismatch, show the original info modal/alert and do nothing else
         try {
-          await chrome.scripting.executeScript({ target: { tabId: activeTab.id }, func: () => alert('This tool only works on the authorized internal mailbox for this Chrome profile.') });
-        } catch (e) { console.warn('[PCA] alert inject failed', e); }
+          await chrome.scripting.executeScript({
+            target: { tabId: activeTab.id },
+            func: () => alert('This tool only works on the authorized internal mailbox for this Chrome profile.')
+          });
+        } catch (e) {
+          console.warn('[PCA] alert inject failed', e);
+        }
         return;
       }
-    } catch {}
+    } catch (e) {
+      console.warn('[PCA] profile check failed on click', e);
+      return;
+    }
   }
-  await ensureTokenInteractive_();
+
+  // 3) Finally, run the main time checkpoint logic with force=true
   handleTimeCheckpoint_(/*force=*/true);
 });
 
