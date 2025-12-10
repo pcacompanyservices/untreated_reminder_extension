@@ -1,132 +1,68 @@
+import { AckService } from './modules/AckService.js';
+import { GmailApiClient } from './modules/GmailApiClient.js';
+import { StorageKeys } from './modules/StorageKeys.js';
+import { closeAllGmailModals_ } from './modules/ModalHelpers.js';
+import { getAckDeadlineFor_, formatShortDateTime_, clearAckDeadlineAlarm_} from './modules/AckHelpers.js';
+import { ensureTokenInteractive_, getToken_} from './modules/OAuthHelpers.js';
+
 // ===== Settings =====
+
 const LABEL_NAME = '_UNTREATED';
 const TARGET_HOUR = 16; 
-const ACK_KEY_PREFIX = 'ack-'; // ack-YYYYMMDD
-const IGNORE_KEY_PREFIX = 'ignore-'; // ignore-YYYYMMDD when user didn't ack by the acknowledgement deadline
-const PENDING_KEY = 'pending-ack-date'; // stores YYYYMMDD when auto modal was shown
-const ACK_DEADLINE_HOUR = 8; // Local hour when the next working day begins (ack deadline time)
+// const ACK_KEY_PREFIX = 'ack-'; // ack-YYYYMMDD
+// const IGNORE_KEY_PREFIX = 'ignore-'; // ignore-YYYYMMDD when user didn't ack by the acknowledgement deadline
+// const PENDING_KEY = 'pending-ack-date'; // stores YYYYMMDD when auto modal was shown
+// const ACK_DEADLINE_HOUR = 8; // Local hour when the next working day begins (ack deadline time)
 const WORK_START_HOUR = 8; // Working hours start (08:00 local)
 const WORK_END_HOUR = 18; // Working hours end (18:00 local, exclusive)
 const GMAIL_URL_MATCH = 'https://mail.google.com/*';
 const TAB_EMAILS_KEY = 'tabMailboxEmails'; // maps tabId -> mailbox email captured from content script
-let cachedProfileEmail = null;
-let profileFetchAttempted = false;
-let profileFetchPromise = null; // de-dupe concurrent fetches
-let profileBackoffUntil = 0; // epoch ms until which we should not refetch after 429
-let profileCacheLoaded = false; // ensure we load persisted cache once
-let countBackoffUntil = 0; // epoch ms to pause exact count after 429
-let countBackoffLoaded = false;
 
-async function ensureCountBackoffLoaded_() {
-  if (countBackoffLoaded) return;
-  try {
-    const st = await chrome.storage.local.get(['countBackoffUntil']);
-    if (typeof st.countBackoffUntil === 'number') countBackoffUntil = st.countBackoffUntil;
-  } catch {}
-  countBackoffLoaded = true;
+
+
+// ===== Gmail API client =====
+async function getProfileEmail_(){
+  return GmailApiClient.getProfileEmail();
 }
 
-async function getProfileEmail_() {
-  // Load cache from storage once (survives SW restarts)
-  if (!profileCacheLoaded) {
-    try {
-      const st = await chrome.storage.local.get(['profileEmailCache', 'profileBackoffUntil']);
-      if (typeof st.profileBackoffUntil === 'number') profileBackoffUntil = st.profileBackoffUntil;
-      if (typeof st.profileEmailCache === 'string' && st.profileEmailCache) {
-        cachedProfileEmail = st.profileEmailCache.toLowerCase();
-      }
-    } catch {}
-    profileCacheLoaded = true;
-  }
-
-  if (cachedProfileEmail) return cachedProfileEmail;
-  if (Date.now() < profileBackoffUntil) {
-    // Still in backoff window, avoid hammering the API
-    return null;
-  }
-  if (profileFetchPromise) return profileFetchPromise;
-
-  profileFetchPromise = (async () => {
-    try {
-      const token = await getToken_();
-      const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/profile?fields=emailAddress', {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (res.ok) {
-        let data = {};
-        try { data = await res.json(); } catch {}
-        cachedProfileEmail = (data && data.emailAddress) ? String(data.emailAddress).toLowerCase() : null;
-        try { await chrome.storage.local.set({ profileEmailCache: cachedProfileEmail || '' }); } catch {}
-        if (!profileFetchAttempted) {
-          console.log('[PCA] Profile email resolved:', cachedProfileEmail || '(null)');
-        }
-        return cachedProfileEmail;
-      }
-
-      // Handle 429 backoff explicitly
-      if (res.status === 429) {
-        let retryAtMs = 0;
-        const retryHdr = res.headers.get('retry-after');
-        if (retryHdr) {
-          const secs = Number(retryHdr);
-          if (!Number.isNaN(secs) && secs > 0) retryAtMs = Date.now() + secs * 1000;
-          else {
-            const t = Date.parse(retryHdr);
-            if (!Number.isNaN(t)) retryAtMs = t;
-          }
-        }
-        if (!retryAtMs) {
-          try {
-            const bodyText = await res.text();
-            // Attempt to extract ISO datetime from error message
-            const m = bodyText.match(/Retry after\s+([0-9T:\-.Z+]+)/i);
-            if (m && m[1]) {
-              const t = Date.parse(m[1]);
-              if (!Number.isNaN(t)) retryAtMs = t;
-            }
-            if (!retryAtMs && bodyText.trim()) console.warn('[PCA] profile 429 body:', bodyText);
-          } catch {}
-        }
-        // Fallback: 2 minutes backoff if not provided
-        if (!retryAtMs) retryAtMs = Date.now() + 2 * 60 * 1000;
-        profileBackoffUntil = retryAtMs;
-        try { await chrome.storage.local.set({ profileBackoffUntil: profileBackoffUntil }); } catch {}
-        if (!profileFetchAttempted) console.warn('[PCA] profile fetch 429; backoff until', new Date(profileBackoffUntil).toISOString());
-        return null;
-      }
-
-      // Other non-OK statuses
-      if (!profileFetchAttempted) {
-        let txt = '';
-        try { txt = await res.text(); } catch {}
-        console.warn('[PCA] profile fetch failed', res.status, txt);
-      }
-      return null;
-    } catch (e) {
-      if (!profileFetchAttempted) console.warn('[PCA] getProfileEmail error', e);
-      return null;
-    } finally {
-      profileFetchAttempted = true;
-      profileFetchPromise = null;
-    }
-  })();
-
-  return profileFetchPromise;
+async function getUntreatedCountExact_(){
+  return GmailApiClient.getUntreatedCountExact()
 }
+
+async function getUntreatedEstimate_(){
+  return GmailApiClient.getUntreatedEstimate();
+}
+
+async function resetProfileCache_(){
+  return GmailApiClient.resetProfileCache();
+}
+
+// async function ensureProfileCacheLoaded_(){
+//   return GmailApiClient.ensureProfileCacheLoaded();
+// }
+
+async function ensureCountBackoffLoaded_(){
+  return GmailApiClient.ensureCountBackoffLoaded();
+}
+
+
+// ===== Acknowledgement service =====
+
+async function runHousekeeping_() {
+  return AckService.runHousekeeping();
+}
+
 
 console.log('[PCA] SW loaded. Ext ID:', chrome.runtime.id);
 
 // Clear profile cache when sign-in state changes
 try {
   chrome.identity.onSignInChanged.addListener(async () => {
-    cachedProfileEmail = null;
-    profileFetchAttempted = false;
-    profileFetchPromise = null;
-    profileBackoffUntil = 0;
-  try { await chrome.storage.local.remove(['profileEmailCache', 'profileBackoffUntil', 'untreatedCountCache', 'countBackoffUntil']); } catch {}
+    await resetProfileCache_();
     console.log('[PCA] Sign-in changed: cleared profile cache');
   });
 } catch {}
+
 
 // Set toolbar icon from local photo
 function setActionIcon_() {
@@ -141,6 +77,8 @@ function setActionIcon_() {
     console.warn('[PCA] setActionIcon failed', e);
   }
 }
+
+
 
 function isGmailUrl_(url) {
   return typeof url === 'string' && url.startsWith('https://mail.google.com/');
@@ -190,6 +128,7 @@ chrome.runtime.onStartup.addListener(() => {
     refreshUntreatedCountCache_().catch(() => {});
   }
 });
+
 chrome.alarms.onAlarm.addListener(a => {
   if (a.name === 'daily-ack') {
     console.log('[PCA] Alarm fired at', new Date().toString());
@@ -214,23 +153,14 @@ chrome.alarms.onAlarm.addListener(a => {
     })();
     return;
   }
-  // Handle acknowledgement deadline alarms (next working day at 08:00 local)
-  if (a.name?.startsWith('ack-deadline-')) {
-    const dateKey = a.name.substring('ack-deadline-'.length);
-    (async () => {
-  console.log('[PCA] Deadline reached for', dateKey, 'at', formatShortDateTime_(new Date()));
-      const ackKey = `${ACK_KEY_PREFIX}${dateKey}`;
-      const ignoreKey = `${IGNORE_KEY_PREFIX}${dateKey}`;
-      const st = await chrome.storage.local.get([ackKey, ignoreKey, PENDING_KEY]);
-      if (!st[ackKey] && !st[ignoreKey]) {
-        await chrome.storage.local.set({ [ignoreKey]: true });
-        if (st[PENDING_KEY] === dateKey) await chrome.storage.local.remove(PENDING_KEY);
-  // Close any lingering modals for that date
-  await closeAllGmailModals_();
-  console.log('[PCA] Missed acknowledgement marked for', dateKey);
-      }
-    })();
-  }
+
+    if (a.name?.startsWith('ack-deadline-')) {
+  const dateKey = a.name.substring('ack-deadline-'.length);
+  (async () => {
+    await AckService.handleDeadlineAlarm(dateKey);
+  })();
+  return;
+}
 });
 
 // Toolbar icon: force a check (and guarantee consent UI)
@@ -294,38 +224,54 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     })();
     return true;
   }
-  if (msg?.type === 'ACK_DATE') {
+    if (msg?.type === 'ACK_DATE') {
     (async () => {
       const todayKey = getTodayKey_();
       const dateKey = msg.dateKey || todayKey;
-      // Accept ACK if it's before the acknowledgement deadline for the given dateKey
+
       const now = new Date();
       const deadline = getAckDeadlineFor_(dateKey);
+
       if (!(now < deadline)) {
-        console.log('[PCA] ACK ignored: past deadline for', dateKey, 'deadline was', formatShortDateTime_(deadline));
-  // Still close all modals for UX
-  await closeAllGmailModals_();
+        console.log(
+          '[PCA] ACK ignored: past deadline for',
+          dateKey,
+          'deadline was',
+          formatShortDateTime_(deadline)
+        );
+        // Still close all modals for UX
+        await closeAllGmailModals_();
         sendResponse({ ok: false, reason: 'late-ack-ignored' });
         return;
       }
-      const ackKey = `${ACK_KEY_PREFIX}${dateKey}`;
+
+      const ackKey = StorageKeys.ack(dateKey);
+
       chrome.storage.local.set({ [ackKey]: true }, async () => {
-  // Broadcast CLOSE_MODAL to all Gmail tabs using sendMessageOrInject_ for reliability
-  await closeAllGmailModals_();
-        // Clear pending for this date and any scheduled acknowledgement deadline alarm
-        const st = await chrome.storage.local.get(PENDING_KEY);
-        if (st[PENDING_KEY] === dateKey) await chrome.storage.local.remove(PENDING_KEY);
-  await clearAckDeadlineAlarm_(dateKey);
-  console.log('[PCA] ACK recorded for', dateKey);
+        // Broadcast CLOSE_MODAL to all Gmail tabs using sendMessageOrInject_ for reliability
+        await closeAllGmailModals_();
+
+        // Clear pending & deadline alarm nếu still pending cho dateKey này
+        const st = await chrome.storage.local.get(StorageKeys.pending);
+        if (st[StorageKeys.pending] === dateKey) {
+          await chrome.storage.local.remove(StorageKeys.pending);
+        }
+
+        await clearAckDeadlineAlarm_(dateKey);
+        console.log('[PCA] ACK recorded for', dateKey);
         sendResponse({ ok: true });
       });
     })();
     return true;
   }
+
   if (msg?.type === 'GET_UNTREATED_COUNT') {
     (async () => {
       try {
+        // const email = await getProfileEmail_();
+
         const email = await getProfileEmail_();
+
         let count = 0;
         if (email) {
           const cached = await readUntreatedCountCacheForEmail_(email);
@@ -366,12 +312,21 @@ async function handleTimeCheckpoint_(force = false) {
   if (!force && (day === 0 || day === 6)) { console.log('[PCA] Weekend; skip'); return; }
   if (!force && now.getHours() < TARGET_HOUR) { console.log(`[PCA] Before target hour (${TARGET_HOUR}); skip`); return; }
 
-  const todayKey = getTodayKey_();
-  const ackKey = `${ACK_KEY_PREFIX}${todayKey}`;
-  const ignoreKey = `${IGNORE_KEY_PREFIX}${todayKey}`;
+  const todayKey  = getTodayKey_();
+  const ackKey    = StorageKeys.ack(todayKey);
+  const ignoreKey = StorageKeys.ignore(todayKey);
+
   const stored = await chrome.storage.local.get([ackKey, ignoreKey]);
-  if (!force && stored[ackKey]) { console.log('[PCA] Already acknowledged today; skip'); return; }
-  if (!force && stored[ignoreKey]) { console.log('[PCA] Already marked ignored today; skip'); return; }
+
+  if (!force && stored[ackKey]) {
+    console.log('[PCA] Already acknowledged today; skip');
+    return;
+  }
+  if (!force && stored[ignoreKey]) {
+    console.log('[PCA] Already ignored today; skip');
+    return;
+  }
+
 
   // Debug: whose token/profile?
   try {
@@ -381,11 +336,14 @@ async function handleTimeCheckpoint_(force = false) {
 
   let count = 0;
   try {
-    count = await getUntreatedCount_({ exact: true });
+    count = await getUntreatedCountExact_()();
   } catch (e) {
     console.warn('[PCA] exact count failed', e);
     // Fallback: use cached exact (if any) and estimate to decide modal
+    
+    // const email = await getProfileEmail_();
     const email = await getProfileEmail_();
+
     let cached = 0;
     if (email) {
       const c = await readUntreatedCountCacheForEmail_(email);
@@ -407,11 +365,9 @@ async function handleTimeCheckpoint_(force = false) {
     const auto = !force;
     await notifyGmailTabs_(count, auto, todayKey);
     if (auto) {
-      await chrome.storage.local.set({ [PENDING_KEY]: todayKey });
-  const deadline = getAckDeadlineFor_(todayKey);
-  console.log('[PCA] Pending set for', todayKey, 'deadline at', formatShortDateTime_(deadline));
-  await scheduleAckDeadlineAlarm_(todayKey);
-    }
+      await AckService.markPending(todayKey);
+      }
+
   } else {
   console.log('[PCA] No _UNTREATED threads; nothing to show');
   }
@@ -522,53 +478,6 @@ function scheduleHourlyCount_() {
   }
 }
 
-async function scheduleAckDeadlineAlarm_(dateKey) {
-  // Schedule the acknowledgement deadline at the start of the next working day (08:00 local)
-  const deadline = getAckDeadlineFor_(dateKey);
-  const name = `ack-deadline-${dateKey}`;
-  try {
-    chrome.alarms.create(name, { when: deadline.getTime() });
-    console.log('[PCA] Ack deadline alarm scheduled at', deadline.toString(), 'for', dateKey);
-  } catch (e) {
-    console.warn('[PCA] Failed to schedule ack deadline alarm', name, e);
-  }
-}
-
-async function clearAckDeadlineAlarm_(dateKey) {
-  const name = `ack-deadline-${dateKey}`;
-  try { await chrome.alarms.clear(name); } catch {}
-}
-
-async function runHousekeeping_() {
-  const st = await chrome.storage.local.get([PENDING_KEY]);
-  const pending = st[PENDING_KEY];
-  if (!pending) return;
-
-  const ackKey = `${ACK_KEY_PREFIX}${pending}`;
-  const ignoreKey = `${IGNORE_KEY_PREFIX}${pending}`;
-  const s2 = await chrome.storage.local.get([ackKey, ignoreKey]);
-  if (s2[ackKey] || s2[ignoreKey]) {
-    // Nothing to do; clear stray pending if any
-    await chrome.storage.local.remove(PENDING_KEY).catch(() => {});
-    await clearAckDeadlineAlarm_(pending).catch(() => {});
-    return;
-  }
-
-  const now = new Date();
-  const deadline = getAckDeadlineFor_(pending);
-  if (now >= deadline) {
-    await chrome.storage.local.set({ [ignoreKey]: true });
-    await chrome.storage.local.remove(PENDING_KEY);
-    await clearAckDeadlineAlarm_(pending);
-  // Best-effort cleanup for any legacy EOD alarms (from previous versions)
-  try { await chrome.alarms.clear(`eod-${pending}`); } catch {}
-  await closeAllGmailModals_();
-    console.log('[PCA] Housekeeping marked missed acknowledgement for', pending);
-  } else {
-    // Ensure the deadline alarm exists and is correctly scheduled
-    await scheduleAckDeadlineAlarm_(pending);
-  }
-}
 
 function getTodayKey_() {
   const d = new Date();
@@ -581,38 +490,8 @@ function isWeekend_(date) {
   return day === 0 || day === 6; // Sunday(0) or Saturday(6)
 }
 
-function getNextAckDeadlineFromDate_(date) {
-  // Returns a Date set to the acknowledgement deadline time on the next working day from the given Date
-  const d = new Date(date);
-  // Move to next day first
-  d.setDate(d.getDate() + 1);
-  d.setHours(ACK_DEADLINE_HOUR, 0, 0, 0);
-  // If it's weekend, advance to Monday at 08:00
-  while (isWeekend_(d)) {
-    d.setDate(d.getDate() + 1);
-    d.setHours(ACK_DEADLINE_HOUR, 0, 0, 0);
-  }
-  return d;
-}
 
-function getAckDeadlineFor_(dateKey) {
-  // Compute the deadline (Date) for acknowledging for the provided dateKey (YYYYMMDD)
-  const y = Number(dateKey.slice(0, 4));
-  const m = Number(dateKey.slice(4, 6)) - 1;
-  const d = Number(dateKey.slice(6, 8));
-  const base = new Date(y, m, d, 0, 0, 0, 0); // start of that day
-  return getNextAckDeadlineFromDate_(base);
-}
 
-function formatShortDateTime_(dt) {
-  const dd = String(dt.getDate()).padStart(2, '0');
-  const mm = String(dt.getMonth() + 1).padStart(2, '0');
-  const yyyy = dt.getFullYear();
-  const hh = String(dt.getHours()).padStart(2, '0');
-  const min = String(dt.getMinutes()).padStart(2, '0');
-  // Return time first (24h) then date: "HH:MM DD/MM/YYYY"
-  return `${hh}:${min} ${dd}/${mm}/${yyyy}`;
-}
 
 // Working hours helper: true if local time within [WORK_START_HOUR, WORK_END_HOUR)
 function isWithinWorkingHours_(date) {
@@ -620,13 +499,7 @@ function isWithinWorkingHours_(date) {
   return h >= WORK_START_HOUR && h < WORK_END_HOUR;
 }
 
-// Close any open modals across Gmail tabs
-async function closeAllGmailModals_() {
-  const { matchedTabs } = await getMatchedGmailTabs_();
-  for (const tab of matchedTabs) {
-    await sendMessageOrInject_(tab.id, { type: 'CLOSE_MODAL' });
-  }
-}
+
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   try {
@@ -636,76 +509,16 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
   } catch {}
 });
 
-// ===== OAuth helpers =====
-async function ensureTokenInteractive_() {
-  await new Promise((resolve, reject) => {
-    chrome.identity.getAuthToken({ interactive: true }, token => {
-      if (chrome.runtime.lastError || !token) reject(chrome.runtime.lastError || new Error('No token'));
-      else resolve(token);
-    });
-  });
-}
-function getToken_() {
-  return new Promise((resolve, reject) => {
-    chrome.identity.getAuthToken({ interactive: false }, token => {
-      if (chrome.runtime.lastError || !token) reject(chrome.runtime.lastError || new Error('No token'));
-      else resolve(token);
-    });
-  });
-}
 
-// ===== Gmail helpers =====
 
-// In-flight de-duplication for exact counting
-let untreatedCountInFlight = null; // Promise<{email, count}> or null
-
-// Get _UNTREATED threads count with options:
-// - exact: if true, compute via pagination (accurate)
-// - useCache: if true, return cached value when available
-async function getUntreatedCount_(opts = {}) {
-  const { exact = false, useCache = true } = opts;
-  const email = await getProfileEmail_();
-  if (!email) {
-    // No profile/email known; best we can do is 0 (also prevents accidental cross-account cache use)
-    return 0;
-  }
-
-  // Try cache first when allowed
-  if (useCache) {
-    const cached = await readUntreatedCountCacheForEmail_(email);
-    if (cached != null && !exact) return cached;
-  }
-
-  // If an exact computation is already in-flight, share it
-  if (untreatedCountInFlight) {
-    try {
-      const res = await untreatedCountInFlight;
-      if (res && res.email === email) return res.count;
-    } catch {
-      // ignore and proceed to compute
-    }
-  }
-
-  // Compute exact count now
-  untreatedCountInFlight = (async () => {
-    const count = await getExactUntreatedCountFromApi_();
-    await writeUntreatedCountCacheForEmail_(email, count).catch(() => {});
-    return { email, count };
-  })();
-
-  try {
-    const res = await untreatedCountInFlight;
-    return res.count;
-  } finally {
-    untreatedCountInFlight = null;
-  }
-}
 
 // Force refresh of cached exact count (used by hourly alarm)
 async function refreshUntreatedCountCache_() {
+  // const email = await getProfileEmail_();
   const email = await getProfileEmail_();
+
   if (!email) return; // no-op when profile unknown or in backoff
-  const count = await getUntreatedCount_({ exact: true, useCache: false }).catch(async (e) => {
+  const count = await getUntreatedCountExact_()().catch(async (e) => {
     // On failure, keep existing cache; simply skip update
     console.warn('[PCA] refresh cache skipped (exact failed)', e);
     const c = await readUntreatedCountCacheForEmail_(email);
@@ -772,20 +585,6 @@ async function getExactUntreatedCountFromApi_() {
   return total;
 }
 
-// Low-cost estimate used as a fallback to decide presence of untreated items
-async function getUntreatedEstimate_() {
-  const token = await getToken_();
-  const params = new URLSearchParams({ maxResults: '1', q: `label:${LABEL_NAME} -in:trash -in:spam` });
-  const url = `https://gmail.googleapis.com/gmail/v1/users/me/threads?${params.toString()}&fields=resultSizeEstimate`;
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-  if (!res.ok) return 0;
-  try {
-    const data = await res.json();
-    return Number(data.resultSizeEstimate) || 0;
-  } catch {
-    return 0;
-  }
-}
 
 // Storage helpers for per-email cached counts
 async function readUntreatedCountCacheForEmail_(email) {
@@ -811,3 +610,5 @@ async function writeUntreatedCountCacheForEmail_(email, count) {
     console.warn('[PCA] Failed to write untreatedCountCache', e);
   }
 }
+
+

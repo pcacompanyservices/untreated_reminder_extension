@@ -13,9 +13,11 @@
   "host_permissions": ["https://mail.google.com/*", "https://www.googleapis.com/*"],
   "oauth2": {
     "client_id": "86595469812-ttqa0ehlprkatrj2rh2647i45oikcdkt.apps.googleusercontent.com",
-    "scopes": ["https://www.googleapis.com/auth/gmail.readonly"]
+    "scopes": ["https://www.googleapis.com/auth/gmail.settings.basic","https://www.googleapis.com/auth/gmail.modify"]
   },
-  "background": { "service_worker": "background.js" },
+  "background": { "service_worker": "background.js",
+                  "type": "module"
+                },
   "content_scripts": [
     {
       "matches": ["https://mail.google.com/*"],
