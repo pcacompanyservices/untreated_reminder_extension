@@ -167,9 +167,11 @@ async function updateActionStateForTab_(tabId, url) {
   }
 }
 
-// Schedule the daily target-hour alarm
+/**
+ * Run on install or update extension
+ */
 chrome.runtime.onInstalled.addListener(() => { 
-  setActionIcon_(); 
+  // setActionIcon_(); 
   scheduleNextAlarm_(); 
   scheduleHourlyCount_(); 
   runHousekeeping_(); 
@@ -179,8 +181,9 @@ chrome.runtime.onInstalled.addListener(() => {
     refreshUntreatedCountCache_().catch(() => {});
   }
 });
+
 chrome.runtime.onStartup.addListener(() => { 
-  setActionIcon_(); 
+  // setActionIcon_(); 
   scheduleNextAlarm_(); 
   scheduleHourlyCount_(); 
   runHousekeeping_(); 
@@ -190,6 +193,7 @@ chrome.runtime.onStartup.addListener(() => {
     refreshUntreatedCountCache_().catch(() => {});
   }
 });
+
 chrome.alarms.onAlarm.addListener(a => {
   if (a.name === 'daily-ack') {
     console.log('[PCA] Alarm fired at', new Date().toString());
@@ -495,28 +499,54 @@ async function getMatchedGmailTabs_() {
   return { matchedTabs, skipped };
 }
 
+/**
+ * function scheduleNextDailyAlarm_
+ * Schedules the next daily alarm at TARGET_HOUR on the next working day.
+ */
 function scheduleNextAlarm_() {
   const now = new Date();
-  const when = new Date(now);
-  when.setHours(TARGET_HOUR, 0, 0, 0);
-  if (when <= now) when.setDate(when.getDate() + 1);
-  // Skip weekends: advance to next non-weekend day at target hour
-  while (isWeekend_(when)) {
-    when.setDate(when.getDate() + 1);
-    when.setHours(TARGET_HOUR, 0, 0, 0);
+  const nextRun = new Date(now);
+  nextRun.setHours(TARGET_HOUR, 0, 0, 0);
+  if (nextRun <= now) nextRun.setDate(nextRun.getDate() + 1);
+  // Skip weekends
+  while (isWeekend_(nextRun)) {
+    nextRun.setDate(nextRun.getDate() + 1);
+    nextRun.setHours(TARGET_HOUR, 0, 0, 0);
   }
-  chrome.alarms.create('daily-ack', { when: when.getTime() });
-  console.log('[PCA] Next alarm scheduled at', when.toString());
+
+  // clear existing alarm before creating a new one
+  chrome.alarms.clear('daily-ack', () => {
+    chrome.alarms.create('daily-ack', { when: nextRun.getTime() });
+    console.log('[PCA] Next daily ACK alarm scheduled at', nextRun.toString());
+  });
 }
 
+
+/**
+ * function scheduleHourlyUntreatedCount_
+ * Schedules an hourly alarm at the top of the hour to refresh exact _UNTREATED count cache.
+ */
 function scheduleHourlyCount_() {
   try {
     const now = new Date();
-    const next = new Date(now);
-    next.setMinutes(0, 0, 0); // top of the hour
-    if (next <= now) next.setHours(next.getHours() + 1);
-    chrome.alarms.create('untreated-hourly', { when: next.getTime(), periodInMinutes: 60 });
-    console.log('[PCA] Hourly count refresh scheduled at', next.toString());
+
+    const nextRun = new Date(now);
+    nextRun.setMinutes(0, 0, 0); // top of the hour
+    if (nextRun <= now) {
+        nextRun.setHours(nextRun.getHours() + 1);
+    }
+
+    chrome.alarms.clear('untreated-hourly', () => {
+      chrome.alarms.create('untreated-hourly', {
+        when: nextRun.getTime(),
+        periodInMinutes: 60,
+      });
+    
+    console.log(
+        '[PCA] Hourly untreated count refresh scheduled at',
+        nextRun.toString()
+      );
+    });
   } catch (e) {
     console.warn('[PCA] scheduleHourlyCount failed', e);
   }
@@ -560,11 +590,12 @@ async function runHousekeeping_() {
     await chrome.storage.local.set({ [ignoreKey]: true });
     await chrome.storage.local.remove(PENDING_KEY);
     await clearAckDeadlineAlarm_(pending);
-  // Best-effort cleanup for any legacy EOD alarms (from previous versions)
-  try { await chrome.alarms.clear(`eod-${pending}`); } catch {}
-  await closeAllGmailModals_();
-    console.log('[PCA] Housekeeping marked missed acknowledgement for', pending);
-  } else {
+    // Best-effort cleanup for any legacy EOD alarms (from previous versions)
+    try { await chrome.alarms.clear(`eod-${pending}`); } catch {}
+    await closeAllGmailModals_();
+      console.log('[PCA] Housekeeping marked missed acknowledgement for', pending);
+    }
+  else {
     // Ensure the deadline alarm exists and is correctly scheduled
     await scheduleAckDeadlineAlarm_(pending);
   }
