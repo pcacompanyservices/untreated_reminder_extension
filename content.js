@@ -44,30 +44,30 @@
     return null;
   }
 
-  async function initMailboxBinding_() {
-    console.log('[content.js] initMailboxBinding_() called');
-    const email = detectMailboxEmail_();
-    if (!email) return; // Try again later via observer below
-    if (email === lastMailboxEmailSent) return; // already reported
-    try {
-      const resp = await chrome.runtime.sendMessage({ type: 'MAILBOX_EMAIL', email });
-      if (resp && resp.ok) {
-        const prev = mailboxMatchAllowed;
-        mailboxMatchAllowed = !!resp.match;
-        lastMailboxEmailSent = email;
-        console.log('[content.js] initMailboxBinding_() response received, match:', mailboxMatchAllowed);
-        if (mailboxMatchAllowed && !prev) {
-          console.log('[content.js] initMailboxBinding_() mailbox matched! Activating...');
-          activateAfterMatch_();
-        }
-      }
-    } catch (e) {
-      console.error('[PCA] initMailboxBinding_ error:', e);
-    }
-  }
-    // Kick initial attempt
-  console.log('[content.js] Scheduling initial initMailboxBinding_() in 400ms');
-  setTimeout(initMailboxBinding_, 400);
+  // async function initMailboxBinding_() {
+  //   console.log('[content.js] initMailboxBinding_() called');
+  //   const email = detectMailboxEmail_();
+  //   if (!email) return; // Try again later via observer below
+  //   if (email === lastMailboxEmailSent) return; // already reported
+  //   try {
+  //     const resp = await chrome.runtime.sendMessage({ type: 'MAILBOX_EMAIL', email });
+  //     if (resp && resp.ok) {
+  //       const prev = mailboxMatchAllowed;
+  //       mailboxMatchAllowed = !!resp.match;
+  //       lastMailboxEmailSent = email;
+  //       console.log('[content.js] initMailboxBinding_() response received, match:', mailboxMatchAllowed);
+  //       if (mailboxMatchAllowed && !prev) {
+  //         console.log('[content.js] initMailboxBinding_() mailbox matched! Activating...');
+  //         activateAfterMatch_();
+  //       }
+  //     }
+  //   } catch (e) {
+  //     console.error('[PCA] initMailboxBinding_ error:', e);
+  //   }
+  // }
+  //   // Kick initial attempt
+  // console.log('[content.js] Scheduling initial initMailboxBinding_() in 400ms');
+  // setTimeout(initMailboxBinding_, 400);
 
   async function tryBindMailbox_(email) {
     if (!email || email === lastMailboxEmailSent) return false;
@@ -117,8 +117,6 @@
 
   console.log('[content.js] Starting mailboxObserver...');
   mailboxObserver.observe(document.documentElement, { subtree: true, childList: true, attributes: true });
-
-
 
   let navObserver;
   let gUntreatedCount = 0; // updated from background
@@ -292,25 +290,25 @@
     }
   });
 
-  bannerObserver.observe(document.body, { childList: true, subtree: true });
+    bannerObserver.observe(document.body, { childList: true, subtree: true });
   };
   // setTimeout(setupBannerObserver_, 900);
 
-  // On Gmail load, ask background to decide (time/weekend/ack). Quick pre-check avoids duplicate popups on reload
+  // // On Gmail load, ask background to decide (time/weekend/ack). Quick pre-check avoids duplicate popups on reload
   const d = new Date();
   const todayKey = `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
   const ackKey = `ack-${todayKey}`;
-  const ignoreKey = `ignore-${todayKey}`;
-  chrome.storage.local.get([ackKey, ignoreKey], store => {
-    if (!mailboxMatchAllowed) return; // will retry on activation
-    if (!store[ackKey] && !store[ignoreKey]) {
-      console.log('[content.js] No ack/ignore found, sending CHECK_AND_MAYBE_SHOW');
-      chrome.runtime.sendMessage({ type: 'CHECK_AND_MAYBE_SHOW' });
-    } else {
-      console.log('[content.js] Already acked or ignored today');
-    }
-  });
-  // Use today's ack key for listeners below
+  // const ignoreKey = `ignore-${todayKey}`;
+  // chrome.storage.local.get([ackKey, ignoreKey], store => {
+  //   if (!mailboxMatchAllowed) return; // will retry on activation
+  //   if (!store[ackKey] && !store[ignoreKey]) {
+  //     console.log('[content.js] No ack/ignore found, sending CHECK_AND_MAYBE_SHOW');
+  //     chrome.runtime.sendMessage({ type: 'CHECK_AND_MAYBE_SHOW' });
+  //   } else {
+  //     console.log('[content.js] Already acked or ignored today');
+  //   }
+  // });
+  // // Use today's ack key for listeners below
 
   // Listen for background trigger (from 4pm alarm or manual click)
   chrome.runtime.onMessage.addListener(msg => {
