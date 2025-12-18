@@ -22,7 +22,9 @@ async function ensureCountBackoffLoaded_() {
   try {
     const st = await chrome.storage.local.get(['countBackoffUntil']);
     if (typeof st.countBackoffUntil === 'number') countBackoffUntil = st.countBackoffUntil;
-  } catch {}
+  } catch (e) {
+    console.error('[PCA] ensureCountBackoffLoaded_ error:', e);
+  }
   countBackoffLoaded = true;
 }
 
@@ -35,7 +37,9 @@ async function getProfileEmail_() {
       if (typeof st.profileEmailCache === 'string' && st.profileEmailCache) {
         cachedProfileEmail = st.profileEmailCache.toLowerCase();
       }
-    } catch {}
+    } catch (e) {
+      console.error('[PCA] getProfileEmail_ cache load error:', e);
+    }
     profileCacheLoaded = true;
   }
 
@@ -54,9 +58,13 @@ async function getProfileEmail_() {
       });
       if (res.ok) {
         let data = {};
-        try { data = await res.json(); } catch {}
+        try { data = await res.json(); } catch (e) {
+          console.error('[PCA] getProfileEmail_ json parse error:', e);
+        }
         cachedProfileEmail = (data && data.emailAddress) ? String(data.emailAddress).toLowerCase() : null;
-        try { await chrome.storage.local.set({ profileEmailCache: cachedProfileEmail || '' }); } catch {}
+        try { await chrome.storage.local.set({ profileEmailCache: cachedProfileEmail || '' }); } catch (e) {
+          console.error('[PCA] getProfileEmail_ cache write error:', e);
+        }
         if (!profileFetchAttempted) {
           console.log('[PCA] Profile email resolved:', cachedProfileEmail || '(null)');
         }
@@ -85,12 +93,16 @@ async function getProfileEmail_() {
               if (!Number.isNaN(t)) retryAtMs = t;
             }
             if (!retryAtMs && bodyText.trim()) console.warn('[PCA] profile 429 body:', bodyText);
-          } catch {}
+          } catch (e) {
+            console.error('[PCA] getProfileEmail_ 429 body parse error:', e);
+          }
         }
         // Fallback: 2 minutes backoff if not provided
         if (!retryAtMs) retryAtMs = Date.now() + 2 * 60 * 1000;
         profileBackoffUntil = retryAtMs;
-        try { await chrome.storage.local.set({ profileBackoffUntil: profileBackoffUntil }); } catch {}
+        try { await chrome.storage.local.set({ profileBackoffUntil: profileBackoffUntil }); } catch (e) {
+          console.error('[PCA] getProfileEmail_ backoff storage error:', e);
+        }
         if (!profileFetchAttempted) console.warn('[PCA] profile fetch 429; backoff until', new Date(profileBackoffUntil).toISOString());
         return null;
       }
@@ -98,7 +110,9 @@ async function getProfileEmail_() {
       // Other non-OK statuses
       if (!profileFetchAttempted) {
         let txt = '';
-        try { txt = await res.text(); } catch {}
+        try { txt = await res.text(); } catch (e) {
+          console.error('[PCA] getProfileEmail_ error text parse error:', e);
+        }
         console.warn('[PCA] profile fetch failed', res.status, txt);
       }
       return null;
@@ -123,10 +137,14 @@ try {
     profileFetchAttempted = false;
     profileFetchPromise = null;
     profileBackoffUntil = 0;
-  try { await chrome.storage.local.remove(['profileEmailCache', 'profileBackoffUntil', 'untreatedCountCache', 'countBackoffUntil']); } catch {}
+  try { await chrome.storage.local.remove(['profileEmailCache', 'profileBackoffUntil', 'untreatedCountCache', 'countBackoffUntil']); } catch (e) {
+      console.error('[PCA] onSignInChanged storage remove error:', e);
+    }
     console.log('[PCA] Sign-in changed: cleared profile cache');
   });
-} catch {}
+} catch (e) {
+  console.error('[PCA] onSignInChanged addListener error:', e);
+}
 
 // Set toolbar icon from local photo
 function setActionIcon_() {
@@ -163,7 +181,10 @@ async function updateActionStateForTab_(tabId, url) {
   await chrome.action.setTitle({ tabId, title: match ? 'PCA Untreated Reminder – Force check' : 'Mailbox does not match this Chrome profile' });
   } catch (e) {
     // Best-effort: if any error, disable to be safe
-    try { await chrome.action.disable(tabId); } catch {}
+    console.error('[PCA] updateActionStateForTab_ error:', e);
+    try { await chrome.action.disable(tabId); } catch (disableErr) {
+      console.error('[PCA] updateActionStateForTab_ disable fallback error:', disableErr);
+    }
   }
 }
 
@@ -277,10 +298,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         map[String(sender.tab.id)] = email;
         await chrome.storage.local.set({ [TAB_EMAILS_KEY]: map });
-      } catch {}
+      } catch (e) {
+        console.error('[PCA] MAILBOX_EMAIL storage set error:', e);
+      }
       const match = !!profile && !!email && profile === email;
   // Update action state for this tab immediately
-  try { await updateActionStateForTab_(sender.tab.id, sender.tab.url || ''); } catch {}
+  try { await updateActionStateForTab_(sender.tab.id, sender.tab.url || ''); } catch (e) {
+        console.error('[PCA] MAILBOX_EMAIL updateActionStateForTab_ error:', e);
+      }
       sendResponse({ ok: true, match, profile });
     })();
     return true; // async
@@ -351,9 +376,13 @@ try {
     try {
       const tab = await chrome.tabs.get(tabId);
       await updateActionStateForTab_(tabId, tab.url || '');
-    } catch {}
+    } catch (e) {
+      console.error('[PCA] onActivated updateActionStateForTab_ error:', e);
+    }
   });
-} catch {}
+} catch (e) {
+  console.error('[PCA] onActivated addListener error:', e);
+}
 
 // Refresh action state when a tab is updated (URL changes, Gmail loads)
 try {
@@ -361,7 +390,9 @@ try {
     if (!changeInfo.url && changeInfo.status !== 'complete') return;
     await updateActionStateForTab_(tabId, (changeInfo.url || tab.url || ''));
   });
-} catch {}
+} catch (e) {
+  console.error('[PCA] onUpdated addListener error:', e);
+}
 
 // ===== Core logic =====
 async function handleTimeCheckpoint_(force = false) {
@@ -395,7 +426,10 @@ async function handleTimeCheckpoint_(force = false) {
       const c = await readUntreatedCountCacheForEmail_(email);
       if (typeof c === 'number') cached = c;
     }
-    const estimate = await getUntreatedEstimate_().catch(() => 0);
+    const estimate = await getUntreatedEstimate_().catch((e) => {
+      console.error('[PCA] handleTimeCheckpoint_ getUntreatedEstimate_ error:', e);
+      return 0;
+    });
     // Prefer cached count for display; use estimate>0 to decide
     count = cached;
     if (estimate <= 0 && cached <= 0) {
@@ -405,7 +439,9 @@ async function handleTimeCheckpoint_(force = false) {
   }
   console.log('[PCA] _UNTREATED (threads exact) =', count);
   // Ensure banner reflects the latest exact count
-  try { await refreshBannersOnGmailTabs_(); } catch {}
+  try { await refreshBannersOnGmailTabs_(); } catch (e) {
+    console.error('[PCA] handleTimeCheckpoint_ refreshBannersOnGmailTabs_ error:', e);
+  }
 
   if (count > 0) {
     const auto = !force;
@@ -436,7 +472,9 @@ async function refreshBannersOnGmailTabs_() {
   const tabs = await chrome.tabs.query({ url: GMAIL_URL_MATCH });
   const profile = await getProfileEmail_();
   let stMap = {};
-  try { const st = await chrome.storage.local.get(TAB_EMAILS_KEY); stMap = st[TAB_EMAILS_KEY] || {}; } catch {}
+  try { const st = await chrome.storage.local.get(TAB_EMAILS_KEY); stMap = st[TAB_EMAILS_KEY] || {}; } catch (e) {
+    console.error('[PCA] refreshBannersOnGmailTabs_ getTabEmailsMap error:', e);
+  }
   let matched = 0;
   for (const tab of tabs) {
     const tabEmail = stMap[String(tab.id)];
@@ -479,7 +517,8 @@ async function getTabEmailsMap_() {
   try {
     const st = await chrome.storage.local.get(TAB_EMAILS_KEY);
     return st[TAB_EMAILS_KEY] || {};
-  } catch {
+  } catch (e) {
+    console.error('[PCA] getTabEmailsMap_ error:', e);
     return {};
   }
 }
@@ -566,7 +605,9 @@ async function scheduleAckDeadlineAlarm_(dateKey) {
 
 async function clearAckDeadlineAlarm_(dateKey) {
   const name = `ack-deadline-${dateKey}`;
-  try { await chrome.alarms.clear(name); } catch {}
+  try { await chrome.alarms.clear(name); } catch (e) {
+    console.error('[PCA] clearAckDeadlineAlarm_ error:', e);
+  }
 }
 
 async function runHousekeeping_() {
@@ -579,8 +620,12 @@ async function runHousekeeping_() {
   const s2 = await chrome.storage.local.get([ackKey, ignoreKey]);
   if (s2[ackKey] || s2[ignoreKey]) {
     // Nothing to do; clear stray pending if any
-    await chrome.storage.local.remove(PENDING_KEY).catch(() => {});
-    await clearAckDeadlineAlarm_(pending).catch(() => {});
+    await chrome.storage.local.remove(PENDING_KEY).catch((e) => {
+      console.error('[PCA] runHousekeeping_ remove PENDING_KEY error:', e);
+    });
+    await clearAckDeadlineAlarm_(pending).catch((e) => {
+      console.error('[PCA] runHousekeeping_ clearAckDeadlineAlarm_ error:', e);
+    });
     return;
   }
 
@@ -591,7 +636,9 @@ async function runHousekeeping_() {
     await chrome.storage.local.remove(PENDING_KEY);
     await clearAckDeadlineAlarm_(pending);
     // Best-effort cleanup for any legacy EOD alarms (from previous versions)
-    try { await chrome.alarms.clear(`eod-${pending}`); } catch {}
+    try { await chrome.alarms.clear(`eod-${pending}`); } catch (e) {
+      console.error('[PCA] runHousekeeping_ clear legacy alarm error:', e);
+    }
     await closeAllGmailModals_();
       console.log('[PCA] Housekeeping marked missed acknowledgement for', pending);
     }
@@ -664,7 +711,9 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
     const st = await chrome.storage.local.get(TAB_EMAILS_KEY);
     const map = st[TAB_EMAILS_KEY] || {};
     if (map[String(tabId)]) { delete map[String(tabId)]; await chrome.storage.local.set({ [TAB_EMAILS_KEY]: map }); }
-  } catch {}
+  } catch (e) {
+    console.error('[PCA] onRemoved tab storage cleanup error:', e);
+  }
 });
 
 // ===== OAuth helpers =====
@@ -712,7 +761,8 @@ async function getUntreatedCount_(opts = {}) {
     try {
       const res = await untreatedCountInFlight;
       if (res && res.email === email) return res.count;
-    } catch {
+    } catch (e) {
+      console.error('[PCA] getUntreatedCount_ untreatedCountInFlight error:', e);
       // ignore and proceed to compute
     }
   }
@@ -720,7 +770,9 @@ async function getUntreatedCount_(opts = {}) {
   // Compute exact count now
   untreatedCountInFlight = (async () => {
     const count = await getExactUntreatedCountFromApi_();
-    await writeUntreatedCountCacheForEmail_(email, count).catch(() => {});
+    await writeUntreatedCountCacheForEmail_(email, count).catch((e) => {
+      console.error('[PCA] getUntreatedCount_ writeUntreatedCountCacheForEmail_ error:', e);
+    });
     return { email, count };
   })();
 
@@ -765,7 +817,9 @@ async function getExactUntreatedCountFromApi_() {
     const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
     if (!res.ok) {
       let txt = '';
-      try { txt = await res.text(); } catch {}
+      try { txt = await res.text(); } catch (e) {
+        console.error('[PCA] getExactUntreatedCountFromApi_ error text parse error:', e);
+      }
       if (res.status === 429) {
         // Parse retry-after and set backoff
         let retryAtMs = 0;
@@ -786,16 +840,22 @@ async function getExactUntreatedCountFromApi_() {
               if (!Number.isNaN(t)) retryAtMs = t;
             }
           }
-        } catch {}
+        } catch (e) {
+          console.error('[PCA] getExactUntreatedCountFromApi_ retry parse error:', e);
+        }
         if (!retryAtMs) retryAtMs = Date.now() + 2 * 60 * 1000; // default 2 min
         countBackoffUntil = retryAtMs;
-        try { await chrome.storage.local.set({ countBackoffUntil }); } catch {}
+        try { await chrome.storage.local.set({ countBackoffUntil }); } catch (e) {
+          console.error('[PCA] getExactUntreatedCountFromApi_ countBackoffUntil storage error:', e);
+        }
         throw new Error(`threads.list failed: 429 backoff-until ${new Date(retryAtMs).toISOString()}`);
       }
       throw new Error(`threads.list failed: ${res.status} ${txt}`);
     }
     let data = {};
-    try { data = await res.json(); } catch {}
+    try { data = await res.json(); } catch (e) {
+      console.error('[PCA] getExactUntreatedCountFromApi_ json response parse error:', e);
+    }
     const arr = Array.isArray(data.threads) ? data.threads : [];
     total += arr.length;
     pageToken = data.nextPageToken;
@@ -813,7 +873,8 @@ async function getUntreatedEstimate_() {
   try {
     const data = await res.json();
     return Number(data.resultSizeEstimate) || 0;
-  } catch {
+  } catch (e) {
+    console.error('[PCA] getUntreatedEstimate_ error:', e);
     return 0;
   }
 }
@@ -827,7 +888,8 @@ async function readUntreatedCountCacheForEmail_(email) {
     if (!entry) return null;
     // Optional: could check staleness here if desired
     return typeof entry.count === 'number' ? entry.count : null;
-  } catch {
+  } catch (e) {
+    console.error('[PCA] readUntreatedCountCacheForEmail_ error:', e);
     return null;
   }
 }
