@@ -10,70 +10,30 @@
   let lastMailboxEmailSent = null; // prevent redundant MAILBOX_EMAIL messages
   let mailboxActivationDone = false;
 
-  function activateAfterMatch_() {
-    if (!mailboxMatchAllowed || mailboxActivationDone) return;
-    mailboxActivationDone = true;
-    // Run banner + styling attempts now that we are allowed
-    try { ensureBanner_(); } catch {}
-    try { styleUntreatedLabel_(gUntreatedCount > 0); } catch {}
-    // Re-run daily check precondition (ACK modal) in case we missed initial window
-    const dAct = new Date();
-    const todayKeyAct = `${dAct.getFullYear()}${String(dAct.getMonth()+1).padStart(2,'0')}${String(dAct.getDate()).padStart(2,'0')}`;
-    const ackKeyAct = `ack-${todayKeyAct}`;
-    const ignoreKeyAct = `ignore-${todayKeyAct}`;
-    chrome.storage.local.get([ackKeyAct, ignoreKeyAct], store => {
-      if (!store[ackKeyAct] && !store[ignoreKeyAct]) {
-        chrome.runtime.sendMessage({ type: 'CHECK_AND_MAYBE_SHOW' });
-      }
-    });
-  }
-
-  // Extract current mailbox email heuristically from Gmail DOM
-  function detectMailboxEmail_() {
-    try {
-      // Strategy 1: Look for account switcher img alt or div[aria-label] containing email
-      const candidate = document.querySelector('a[aria-label*="@"], div[aria-label*="@"], img[aria-label*="@"]');
-      const aria = candidate && (candidate.getAttribute('aria-label') || '');
-      if (aria && /[A-Z0-9._%+-]+@[A-Z0-9.-]+/i.test(aria)) {
-        const m = aria.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+/i);
-        if (m) return m[0].toLowerCase();
-      }
-      // Strategy 2: Look for span elements containing an email pattern (common in header avatar tooltip)
-      const spans = Array.from(document.querySelectorAll('span'));
-      for (const s of spans) {
-        const txt = (s.textContent || '').trim();
-        if (/^[A-Z0-9._%+-]+@[A-Z0-9.-]+$/i.test(txt)) return txt.toLowerCase();
-      }
-    } catch {}
-    return null;
-  }
-
-  async function initMailboxBinding_() {
-    const email = detectMailboxEmail_();
-    if (!email) return; // Try again later via observer below
-    if (email === lastMailboxEmailSent) return; // already reported
-    try {
-      const resp = await chrome.runtime.sendMessage({ type: 'MAILBOX_EMAIL', email });
-      if (resp && resp.ok) {
-        const prev = mailboxMatchAllowed;
-        mailboxMatchAllowed = !!resp.match;
-        lastMailboxEmailSent = email;
-        if (mailboxMatchAllowed && !prev) {
-          activateAfterMatch_();
-        }
-      }
-    } catch {}
-  }
-
+  
   // Observe for initial mailbox email appearance (Gmail loads async)
+  // const mailboxObserver = new MutationObserver(() => {
+  //   if (!mailboxMatchAllowed) {
+  //     const found = detectMailboxEmail_();
+  //     if (found) {
+  //       initMailboxBinding_();
+  //     }
+  //   }
+  // });
+
   const mailboxObserver = new MutationObserver(() => {
-    if (!mailboxMatchAllowed) {
-      const found = detectMailboxEmail_();
-      if (found) {
-        initMailboxBinding_();
-      }
+    if (mailboxMatchAllowed) {
+      mailboxObserver.disconnect();
+      return;
     }
-  });
+    const email = detectMailboxEmail_();
+    if (email) {
+      tryBindMailbox_(email).then(success => {
+        if (success) mailboxObserver.disconnect();
+      });
+    }
+});
+
   mailboxObserver.observe(document.documentElement, { subtree: true, childList: true, attributes: true });
   // Kick initial attempt
   setTimeout(initMailboxBinding_, 400);
@@ -132,6 +92,7 @@
       }
     }
   };
+  
   const setupNavObserver_ = () => {
     if (navObserver) return;
     const target = document.body;
@@ -265,76 +226,76 @@
     }
   });
   function showModal_(count, isAuto, dateKey, allowMismatch = false) {
-  if (!mailboxMatchAllowed && !allowMismatch) return; // mismatch: only show if forced
-  if (document.getElementById('pca-untreated-overlay')) return; // avoid duplicates
+    if (!mailboxMatchAllowed && !allowMismatch) return; // mismatch: only show if forced
+    if (document.getElementById('pca-untreated-overlay')) return; // avoid duplicates
 
-  const overlay = document.createElement('div');
-  overlay.id = 'pca-untreated-overlay';
-  Object.assign(overlay.style, {
-    position: 'fixed',
-    inset: '0',
-    background: 'rgba(0,0,0,0.6)',
-    zIndex: '2147483647',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center'
-  });
+    const overlay = document.createElement('div');
+    overlay.id = 'pca-untreated-overlay';
+    Object.assign(overlay.style, {
+      position: 'fixed',
+      inset: '0',
+      background: 'rgba(0,0,0,0.6)',
+      zIndex: '2147483647',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center'
+    });
 
-  const box = document.createElement('div');
-  Object.assign(box.style, {
-    background: '#fff',
-    padding: '28px 32px',
-    maxWidth: '640px',
-    width: '92%',
-    borderRadius: '12px',
-    boxShadow: '0 10px 30px rgba(0,0,0,0.2)',
-    fontFamily: 'Arial, sans-serif',
-    textAlign: 'center' // center all text
-  });
+    const box = document.createElement('div');
+    Object.assign(box.style, {
+      background: '#fff',
+      padding: '28px 32px',
+      maxWidth: '640px',
+      width: '92%',
+      borderRadius: '12px',
+      boxShadow: '0 10px 30px rgba(0,0,0,0.2)',
+      fontFamily: 'Arial, sans-serif',
+      textAlign: 'center' // center all text
+    });
 
-  const stamp = buildTimestamp_(); // "HH:MM DD/MM/YYYY"
+    const stamp = buildTimestamp_(); // "HH:MM DD/MM/YYYY"
 
-  box.innerHTML = `
-    <p style="margin:0 0 6px 0; font-size:20px; font-weight:700;">
-  By ${stamp}, you have ${count} UNTREATED email(s). Please treat them immediately.
-    </p>
-    <p style="margin:6px 0 20px 0; color:#444; font-size:18px;">
-  Tính đến ${stamp}, bạn có ${count} email chưa được xử lý. Vui lòng xử lý ngay.
-    </p>
-    <div id="pca-btn-row" style="display:flex; gap:12px; justify-content:center; align-items:center;">
-  <button id="pca-ack-btn" data-auto="${isAuto ? 'true' : 'false'}" data-date="${dateKey || ''}" style="
-        padding:10px 20px;
-        border:none;
-        border-radius:10px;
-        background:#C1272D;
-        color:#fff;
-        font-size:16px;
-        cursor:pointer;
-        font-family: inherit;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-      ">
-        <span style="font-weight:700; font-size:16px;">I understand and I will take care of it now</span>
-        <span style="font-weight:400; font-size:15px; margin-top:2px;">Tôi đã đọc và tôi sẽ xử lý ngay bây giờ</span>
-      </button>
-    </div>
-  `;
+    box.innerHTML = `
+      <p style="margin:0 0 6px 0; font-size:20px; font-weight:700;">
+    By ${stamp}, you have ${count} UNTREATED email(s). Please treat them immediately.
+      </p>
+      <p style="margin:6px 0 20px 0; color:#444; font-size:18px;">
+    Tính đến ${stamp}, bạn có ${count} email chưa được xử lý. Vui lòng xử lý ngay.
+      </p>
+      <div id="pca-btn-row" style="display:flex; gap:12px; justify-content:center; align-items:center;">
+    <button id="pca-ack-btn" data-auto="${isAuto ? 'true' : 'false'}" data-date="${dateKey || ''}" style="
+          padding:10px 20px;
+          border:none;
+          border-radius:10px;
+          background:#C1272D;
+          color:#fff;
+          font-size:16px;
+          cursor:pointer;
+          font-family: inherit;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+        ">
+          <span style="font-weight:700; font-size:16px;">I understand and I will take care of it now</span>
+          <span style="font-weight:400; font-size:15px; margin-top:2px;">Tôi đã đọc và tôi sẽ xử lý ngay bây giờ</span>
+        </button>
+      </div>
+    `;
 
-  overlay.appendChild(box);
-  document.documentElement.appendChild(overlay);
+    overlay.appendChild(box);
+    document.documentElement.appendChild(overlay);
 
-  const ackBtn = document.getElementById('pca-ack-btn');
-  ackBtn.addEventListener('click', () => {
-    overlay.remove();
-    // Always request closing modals in other tabs
-    chrome.runtime.sendMessage({ type: 'CLOSE_ALL_MODALS' });
-    // Only count acknowledgment when auto-triggered
-    if (ackBtn.dataset.auto === 'true') {
-      const dateKey = ackBtn.dataset.date;
-      chrome.runtime.sendMessage({ type: 'ACK_DATE', dateKey });
-    }
-  }, { once: true });
+    const ackBtn = document.getElementById('pca-ack-btn');
+    ackBtn.addEventListener('click', () => {
+      overlay.remove();
+      // Always request closing modals in other tabs
+      chrome.runtime.sendMessage({ type: 'CLOSE_ALL_MODALS' });
+      // Only count acknowledgment when auto-triggered
+      if (ackBtn.dataset.auto === 'true') {
+        const dateKey = ackBtn.dataset.date;
+        chrome.runtime.sendMessage({ type: 'ACK_DATE', dateKey });
+      }
+    }, { once: true });
   }
 
   function buildTimestamp_() {
@@ -346,5 +307,80 @@
     const min = String(d.getMinutes()).padStart(2, '0');
     // Return time first (24h) then date: "HH:MM DD/MM/YYYY"
     return `${hh}:${min} ${dd}/${mm}/${yyyy}`;
+  }
+
+  function activateAfterMatch_() {
+    if (!mailboxMatchAllowed || mailboxActivationDone) return;
+    mailboxActivationDone = true;
+    // Run banner + styling attempts now that we are allowed
+    try { ensureBanner_(); } catch {}
+    try { styleUntreatedLabel_(gUntreatedCount > 0); } catch {}
+    // Re-run daily check precondition (ACK modal) in case we missed initial window
+    const dAct = new Date();
+    const todayKeyAct = `${dAct.getFullYear()}${String(dAct.getMonth()+1).padStart(2,'0')}${String(dAct.getDate()).padStart(2,'0')}`;
+    const ackKeyAct = `ack-${todayKeyAct}`;
+    const ignoreKeyAct = `ignore-${todayKeyAct}`;
+    chrome.storage.local.get([ackKeyAct, ignoreKeyAct], store => {
+      if (!store[ackKeyAct] && !store[ignoreKeyAct]) {
+        chrome.runtime.sendMessage({ type: 'CHECK_AND_MAYBE_SHOW' });
+      }
+    });
+  }
+
+  // Extract current mailbox email heuristically from Gmail DOM
+  function detectMailboxEmail_() {
+    try {
+      // Strategy 1: Look for account switcher img alt or div[aria-label] containing email
+      const candidate = document.querySelector('a[aria-label*="@"], div[aria-label*="@"], img[aria-label*="@"]');
+      const aria = candidate && (candidate.getAttribute('aria-label') || '');
+      if (aria && /[A-Z0-9._%+-]+@[A-Z0-9.-]+/i.test(aria)) {
+        const m = aria.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+/i);
+        if (m) return m[0].toLowerCase();
+      }
+      // Strategy 2: Look for span elements containing an email pattern (common in header avatar tooltip)
+      const spans = Array.from(document.querySelectorAll('span'));
+      for (const s of spans) {
+        const txt = (s.textContent || '').trim();
+        if (/^[A-Z0-9._%+-]+@[A-Z0-9.-]+$/i.test(txt)) return txt.toLowerCase();
+      }
+    } catch {}
+    return null;
+  }
+
+  async function initMailboxBinding_() {
+    const email = detectMailboxEmail_();
+    if (!email) return; // Try again later via observer below
+    if (email === lastMailboxEmailSent) return; // already reported
+    try {
+      const resp = await chrome.runtime.sendMessage({ type: 'MAILBOX_EMAIL', email });
+      if (resp && resp.ok) {
+        const prev = mailboxMatchAllowed;
+        mailboxMatchAllowed = !!resp.match;
+        lastMailboxEmailSent = email;
+        if (mailboxMatchAllowed && !prev) {
+          activateAfterMatch_();
+        }
+      }
+    } catch {}
+  }
+
+  async function tryBindMailbox_(email) {
+    if (!email || email === lastMailboxEmailSent) return false;
+
+    try {
+      const resp = await chrome.runtime.sendMessage({ type: 'MAILBOX_EMAIL', email });
+      if (resp?.ok) {
+        lastMailboxEmailSent = email;
+        const prev = mailboxMatchAllowed;
+        mailboxMatchAllowed = !!resp.match;
+        if (mailboxMatchAllowed && !prev) {
+          activateAfterMatch_();
+          return true; // success
+        }
+      }
+    } catch (e) {
+      console.warn('[mailbox] bind failed', e);
+    }
+    return false; // fail
   }
 })();

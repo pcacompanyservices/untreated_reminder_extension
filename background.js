@@ -292,12 +292,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true; // async
   }
   if (msg?.type === 'CLOSE_ALL_MODALS') {
-    (async () => {
-  await closeAllGmailModals_();
-      sendResponse({ ok: true });
-    })();
-    return true;
-  }
+      (async () => {
+        await closeAllGmailModals_();
+        sendResponse({ ok: true });
+      })();
+      return true;
+    }
   if (msg?.type === 'ACK_DATE') {
     (async () => {
       const todayKey = getTodayKey_();
