@@ -1,7 +1,12 @@
 (function init() {
+  console.log('[content.js] Script initializing...');
   // Avoid double-injection (programmatic + manifest) causing redeclarations
-  if (window.__PCA_CONTENT_LOADED__) return;
+  if (window.__PCA_CONTENT_LOADED__) {
+    console.log('[content.js] Already loaded, skipping initialization');
+    return;
+  }
   window.__PCA_CONTENT_LOADED__ = true;
+  console.log('[content.js] Initialization started');
 
   // Keep _UNTREATED label icon and text in PCA red in the Gmail UI (left navigation)
   const PCA_RED = '#C1272D';
@@ -18,6 +23,7 @@
    */
   // Extract current mailbox email heuristically from Gmail DOM
   function detectMailboxEmail_() {
+    console.log('[content.js] detectMailboxEmail_() called');
     try {
       // Strategy 1: Look for account switcher img alt or div[aria-label] containing email
       const candidate = document.querySelector('a[aria-label*="@"], div[aria-label*="@"], img[aria-label*="@"]');
@@ -39,6 +45,7 @@
   }
 
   async function initMailboxBinding_() {
+    console.log('[content.js] initMailboxBinding_() called');
     const email = detectMailboxEmail_();
     if (!email) return; // Try again later via observer below
     if (email === lastMailboxEmailSent) return; // already reported
@@ -48,7 +55,9 @@
         const prev = mailboxMatchAllowed;
         mailboxMatchAllowed = !!resp.match;
         lastMailboxEmailSent = email;
+        console.log('[content.js] initMailboxBinding_() response received, match:', mailboxMatchAllowed);
         if (mailboxMatchAllowed && !prev) {
+          console.log('[content.js] initMailboxBinding_() mailbox matched! Activating...');
           activateAfterMatch_();
         }
       }
@@ -56,6 +65,9 @@
       console.error('[PCA] initMailboxBinding_ error:', e);
     }
   }
+    // Kick initial attempt
+  console.log('[content.js] Scheduling initial initMailboxBinding_() in 400ms');
+  setTimeout(initMailboxBinding_, 400);
 
   async function tryBindMailbox_(email) {
     if (!email || email === lastMailboxEmailSent) return false;
@@ -66,7 +78,9 @@
         lastMailboxEmailSent = email;
         const prev = mailboxMatchAllowed;
         mailboxMatchAllowed = !!resp.match;
+        console.log('[content.js] tryBindMailbox_() response, match:', mailboxMatchAllowed);
         if (mailboxMatchAllowed && !prev) {
+          console.log('[content.js] tryBindMailbox_() success! Activating...');
           activateAfterMatch_();
           return true; // success
         }
@@ -89,6 +103,7 @@
 
   const mailboxObserver = new MutationObserver(() => {
     if (mailboxMatchAllowed) {
+      console.log('[content.js] mailboxObserver: match already allowed, disconnecting');
       mailboxObserver.disconnect();
       return;
     }
@@ -100,9 +115,9 @@
     }
 });
 
+  console.log('[content.js] Starting mailboxObserver...');
   mailboxObserver.observe(document.documentElement, { subtree: true, childList: true, attributes: true });
-  // Kick initial attempt
-  setTimeout(initMailboxBinding_, 400);
+
 
 
   let navObserver;
@@ -174,37 +189,28 @@
       clearTimeout(timer);
       timer = setTimeout(() => styleSpecialLabels_(), 150);
     });
+    console.log('[content.js] setupNavObserver_() starting observer');
     navObserver.observe(target, {
       subtree: true,
       childList: true,
-      attributes: true,
-      attributeFilter: ['style', 'class', 'color']
+      // attributes: true,
+      // attributeFilter: ['style', 'class', 'color']
     });
     // Initial attempt
     styleSpecialLabels_();
   };
-  // Defer slightly to allow Gmail to render initial UI
-  setTimeout(setupNavObserver_, 600);
+  // // Defer slightly to allow Gmail to render initial UI
+  // setTimeout(setupNavObserver_, 600);
 
   // --- Top banner: "You have ... UNTREATED emails" in PCA red, centered ---
   const BANNER_ID = 'pca-untreated-banner';
-  const ensureBanner_ = async () => {
-    if (!mailboxMatchAllowed) return; // deactivated for this mailbox
-    // Ask background for latest count
-    let count = 0;
-    try {
-      const resp = await chrome.runtime.sendMessage({ type: 'GET_UNTREATED_COUNT' });
-      if (resp && resp.ok) count = resp.count || 0;
-    } catch (e) {
-      console.error('[PCA] ensureBanner_ GET_UNTREATED_COUNT error:', e);
-    }
-    gUntreatedCount = count;
 
+  const renderBanner_ = (count) => {
     // Find the top area above the list; Gmail structure varies, target the main list container parent
     const list = document.querySelector('div[role="main"]');
     if (!list || !list.parentElement) {
       // Still update left nav styling based on count
-      styleSpecialLabels_();
+      // styleSpecialLabels_();
       return;
     }
     const host = list.parentElement;
@@ -227,9 +233,9 @@
         fontWeight: '700',
         textAlign: 'center'
       });
-      // Insert just before the main list
       host.insertBefore(banner, list);
     }
+    
     if (count > 0) {
       banner.innerHTML = `
         <div style="margin:0;">You have ${count} UNTREATED email(s).</div>
@@ -237,28 +243,58 @@
       `;
       banner.style.display = 'flex';
       banner.style.color = '#C1272D';
-      styleSpecialLabels_();
+      // styleSpecialLabels_();
     } else {
       banner.style.display = 'none';
-      styleSpecialLabels_();
+      // styleSpecialLabels_();
     }
+  };
+  const ensureBanner_ = async () => {
+    if (!mailboxMatchAllowed) return; // deactivated for this mailbox
+    // Ask background for latest count
+    let count = gUntreatedCount;
+    try {
+      const resp = await chrome.runtime.sendMessage({ type: 'GET_UNTREATED_COUNT' });
+      if (resp && resp.ok) count = resp.count || 0;
+    } catch (e) {
+      console.error('[PCA] ensureBanner_ GET_UNTREATED_COUNT error:', e);
+    }
+    if (count === gUntreatedCount) {
+      // No change
+      return;
+    }
+
+    gUntreatedCount = count;
+    console.log('[content.js] ensureBanner_() count received:', count);
+
+    renderBanner_(count);
   };
 
   // Keep the banner in place as the UI updates
   let bannerObserver;
   const setupBannerObserver_ = () => {
     if (bannerObserver) return;
-    const target = document.body;
-    if (!target) return;
-    let timer;
+    // const target = document.body;
+    // if (!target) return;
+    // let timer;
+    // bannerObserver = new MutationObserver(() => {
+    //   clearTimeout(timer);
+    //   timer = setTimeout(() => { ensureBanner_(); }, 300);
+    // });
+    // console.log('[content.js] setupBannerObserver_() starting observer');
+    // bannerObserver.observe(target, { childList: true, subtree: true });
+    // ensureBanner_();
+
     bannerObserver = new MutationObserver(() => {
-      clearTimeout(timer);
-      timer = setTimeout(() => { ensureBanner_(); }, 300);
-    });
-    bannerObserver.observe(target, { childList: true, subtree: true });
-    ensureBanner_();
+    const banner = document.getElementById(BANNER_ID);
+    if (!banner && gUntreatedCount > 0) {
+      renderBanner_(gUntreatedCount);
+    }
+  });
+
+  bannerObserver.observe(document.body, { childList: true, subtree: true });
   };
-  setTimeout(setupBannerObserver_, 900);
+  // setTimeout(setupBannerObserver_, 900);
 
   // On Gmail load, ask background to decide (time/weekend/ack). Quick pre-check avoids duplicate popups on reload
   const d = new Date();
@@ -268,13 +304,17 @@
   chrome.storage.local.get([ackKey, ignoreKey], store => {
     if (!mailboxMatchAllowed) return; // will retry on activation
     if (!store[ackKey] && !store[ignoreKey]) {
+      console.log('[content.js] No ack/ignore found, sending CHECK_AND_MAYBE_SHOW');
       chrome.runtime.sendMessage({ type: 'CHECK_AND_MAYBE_SHOW' });
+    } else {
+      console.log('[content.js] Already acked or ignored today');
     }
   });
   // Use today's ack key for listeners below
 
   // Listen for background trigger (from 4pm alarm or manual click)
   chrome.runtime.onMessage.addListener(msg => {
+    console.log('[content.js] Received message:', msg?.type);
     if (msg?.type === 'SHOW_MODAL') {
       // Allow showing on mismatch only when explicitly forced by background
       const allowMismatch = !!msg.allowMismatch;
@@ -295,6 +335,7 @@
   chrome.storage.onChanged.addListener((changes, area) => {
     if (!mailboxMatchAllowed) return;
     if (area === 'local' && changes[ackKey]?.newValue) {
+      console.log('[content.js] Storage changed: ack detected, closing modal');
       const overlay = document.getElementById('pca-untreated-overlay');
       if (overlay) overlay.remove();
     }
@@ -358,9 +399,11 @@
 
     overlay.appendChild(box);
     document.documentElement.appendChild(overlay);
+    console.log('[content.js] showModal_() modal displayed');
 
     const ackBtn = document.getElementById('pca-ack-btn');
     ackBtn.addEventListener('click', () => {
+      console.log('[content.js] Ack button clicked');
       overlay.remove();
       // Always request closing modals in other tabs
       chrome.runtime.sendMessage({ type: 'CLOSE_ALL_MODALS' });
@@ -386,13 +429,14 @@
   function activateAfterMatch_() {
     if (!mailboxMatchAllowed || mailboxActivationDone) return;
     mailboxActivationDone = true;
-    // Run banner + styling attempts now that we are allowed
-    try { ensureBanner_(); } catch (e) {
-      console.error('[PCA] activateAfterMatch_ ensureBanner_ error:', e);
-    }
-    try { styleUntreatedLabel_(gUntreatedCount > 0); } catch (e) {
-      console.error('[PCA] activateAfterMatch_ styleUntreatedLabel_ error:', e);
-    }
+    console.log('[content.js] activateAfterMatch_() starting activation sequence...');
+    
+    setupNavObserver_();
+
+    setupBannerObserver_();
+    
+    ensureBanner_();
+
     // Re-run daily check precondition (ACK modal) in case we missed initial window
     const dAct = new Date();
     const todayKeyAct = `${dAct.getFullYear()}${String(dAct.getMonth()+1).padStart(2,'0')}${String(dAct.getDate()).padStart(2,'0')}`;
