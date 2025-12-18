@@ -10,7 +10,73 @@
   let lastMailboxEmailSent = null; // prevent redundant MAILBOX_EMAIL messages
   let mailboxActivationDone = false;
 
-  
+  /**
+   * First, get email from mailbox DOM
+   * Then, send to background to check if it matches the profile email
+   * if matched, set mailboxMatchAllowed = true and update lastMailboxEmailSent
+   * 
+   */
+  // Extract current mailbox email heuristically from Gmail DOM
+  function detectMailboxEmail_() {
+    try {
+      // Strategy 1: Look for account switcher img alt or div[aria-label] containing email
+      const candidate = document.querySelector('a[aria-label*="@"], div[aria-label*="@"], img[aria-label*="@"]');
+      const aria = candidate && (candidate.getAttribute('aria-label') || '');
+      if (aria && /[A-Z0-9._%+-]+@[A-Z0-9.-]+/i.test(aria)) {
+        const m = aria.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+/i);
+        if (m) return m[0].toLowerCase();
+      }
+      // Strategy 2: Look for span elements containing an email pattern (common in header avatar tooltip)
+      const spans = Array.from(document.querySelectorAll('span'));
+      for (const s of spans) {
+        const txt = (s.textContent || '').trim();
+        if (/^[A-Z0-9._%+-]+@[A-Z0-9.-]+$/i.test(txt)) return txt.toLowerCase();
+      }
+    } catch (e) {
+      console.error('[PCA] detectMailboxEmail_ error:', e);
+    }
+    return null;
+  }
+
+  async function initMailboxBinding_() {
+    const email = detectMailboxEmail_();
+    if (!email) return; // Try again later via observer below
+    if (email === lastMailboxEmailSent) return; // already reported
+    try {
+      const resp = await chrome.runtime.sendMessage({ type: 'MAILBOX_EMAIL', email });
+      if (resp && resp.ok) {
+        const prev = mailboxMatchAllowed;
+        mailboxMatchAllowed = !!resp.match;
+        lastMailboxEmailSent = email;
+        if (mailboxMatchAllowed && !prev) {
+          activateAfterMatch_();
+        }
+      }
+    } catch (e) {
+      console.error('[PCA] initMailboxBinding_ error:', e);
+    }
+  }
+
+  async function tryBindMailbox_(email) {
+    if (!email || email === lastMailboxEmailSent) return false;
+
+    try {
+      const resp = await chrome.runtime.sendMessage({ type: 'MAILBOX_EMAIL', email });
+      if (resp?.ok) {
+        lastMailboxEmailSent = email;
+        const prev = mailboxMatchAllowed;
+        mailboxMatchAllowed = !!resp.match;
+        if (mailboxMatchAllowed && !prev) {
+          activateAfterMatch_();
+          return true; // success
+        }
+      }
+    } catch (e) {
+      console.warn('[mailbox] bind failed', e);
+    }
+    return false; // fail
+  }
+
   // Observe for initial mailbox email appearance (Gmail loads async)
   // const mailboxObserver = new MutationObserver(() => {
   //   if (!mailboxMatchAllowed) {
@@ -37,6 +103,8 @@
   mailboxObserver.observe(document.documentElement, { subtree: true, childList: true, attributes: true });
   // Kick initial attempt
   setTimeout(initMailboxBinding_, 400);
+
+
   let navObserver;
   let gUntreatedCount = 0; // updated from background
   // Style all special labels regardless of overdue count
@@ -57,7 +125,9 @@
         try {
           a.style.setProperty('color', style.color, 'important');
           a.style.setProperty('font-weight', style.fontWeight, 'important');
-        } catch {}
+        } catch (e) {
+          console.error('[PCA] styleSpecialLabels_ label color error:', e);
+        }
         // Special badge for _UNTREATED, _Processing, _Follow-up
         if (style.badge) {
           const row = a.closest('[role="listitem"], tr, div');
@@ -83,7 +153,9 @@
                   el.style.setProperty('line-height', '1', 'important');
                   el.style.setProperty('vertical-align', 'middle', 'important');
                   el.dataset.pcaCountStyled = '1';
-                } catch {}
+                } catch (e) {
+                  console.error('[PCA] styleSpecialLabels_ badge styling error:', e);
+                }
                 break;
               }
             }
@@ -123,7 +195,9 @@
     try {
       const resp = await chrome.runtime.sendMessage({ type: 'GET_UNTREATED_COUNT' });
       if (resp && resp.ok) count = resp.count || 0;
-    } catch {}
+    } catch (e) {
+      console.error('[PCA] ensureBanner_ GET_UNTREATED_COUNT error:', e);
+    }
     gUntreatedCount = count;
 
     // Find the top area above the list; Gmail structure varies, target the main list container parent
@@ -313,8 +387,12 @@
     if (!mailboxMatchAllowed || mailboxActivationDone) return;
     mailboxActivationDone = true;
     // Run banner + styling attempts now that we are allowed
-    try { ensureBanner_(); } catch {}
-    try { styleUntreatedLabel_(gUntreatedCount > 0); } catch {}
+    try { ensureBanner_(); } catch (e) {
+      console.error('[PCA] activateAfterMatch_ ensureBanner_ error:', e);
+    }
+    try { styleUntreatedLabel_(gUntreatedCount > 0); } catch (e) {
+      console.error('[PCA] activateAfterMatch_ styleUntreatedLabel_ error:', e);
+    }
     // Re-run daily check precondition (ACK modal) in case we missed initial window
     const dAct = new Date();
     const todayKeyAct = `${dAct.getFullYear()}${String(dAct.getMonth()+1).padStart(2,'0')}${String(dAct.getDate()).padStart(2,'0')}`;
@@ -327,60 +405,4 @@
     });
   }
 
-  // Extract current mailbox email heuristically from Gmail DOM
-  function detectMailboxEmail_() {
-    try {
-      // Strategy 1: Look for account switcher img alt or div[aria-label] containing email
-      const candidate = document.querySelector('a[aria-label*="@"], div[aria-label*="@"], img[aria-label*="@"]');
-      const aria = candidate && (candidate.getAttribute('aria-label') || '');
-      if (aria && /[A-Z0-9._%+-]+@[A-Z0-9.-]+/i.test(aria)) {
-        const m = aria.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+/i);
-        if (m) return m[0].toLowerCase();
-      }
-      // Strategy 2: Look for span elements containing an email pattern (common in header avatar tooltip)
-      const spans = Array.from(document.querySelectorAll('span'));
-      for (const s of spans) {
-        const txt = (s.textContent || '').trim();
-        if (/^[A-Z0-9._%+-]+@[A-Z0-9.-]+$/i.test(txt)) return txt.toLowerCase();
-      }
-    } catch {}
-    return null;
-  }
-
-  async function initMailboxBinding_() {
-    const email = detectMailboxEmail_();
-    if (!email) return; // Try again later via observer below
-    if (email === lastMailboxEmailSent) return; // already reported
-    try {
-      const resp = await chrome.runtime.sendMessage({ type: 'MAILBOX_EMAIL', email });
-      if (resp && resp.ok) {
-        const prev = mailboxMatchAllowed;
-        mailboxMatchAllowed = !!resp.match;
-        lastMailboxEmailSent = email;
-        if (mailboxMatchAllowed && !prev) {
-          activateAfterMatch_();
-        }
-      }
-    } catch {}
-  }
-
-  async function tryBindMailbox_(email) {
-    if (!email || email === lastMailboxEmailSent) return false;
-
-    try {
-      const resp = await chrome.runtime.sendMessage({ type: 'MAILBOX_EMAIL', email });
-      if (resp?.ok) {
-        lastMailboxEmailSent = email;
-        const prev = mailboxMatchAllowed;
-        mailboxMatchAllowed = !!resp.match;
-        if (mailboxMatchAllowed && !prev) {
-          activateAfterMatch_();
-          return true; // success
-        }
-      }
-    } catch (e) {
-      console.warn('[mailbox] bind failed', e);
-    }
-    return false; // fail
-  }
 })();
