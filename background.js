@@ -1,9 +1,7 @@
 // ===== Settings =====
 const LABEL_NAME = '_UNTREATED';
 const TARGET_HOUR = 16; 
-const ACK_KEY_PREFIX = 'ack-'; // ack-YYYYMMDD
-const IGNORE_KEY_PREFIX = 'ignore-'; // ignore-YYYYMMDD when user didn't ack by the acknowledgement deadline
-const PENDING_KEY = 'pending-ack-date'; // stores YYYYMMDD when auto modal was shown
+const ACK_RECORDS_KEY = 'ack-records'; // { "YYYYMMDD": { state, shownAt, deadlineAt, source } }
 const ACK_DEADLINE_HOUR = 8; // Local hour when the next working day begins (ack deadline time)
 const WORK_START_HOUR = 8; // Working hours start (08:00 local)
 const WORK_END_HOUR = 18; // Working hours end (18:00 local, exclusive)
@@ -26,6 +24,48 @@ async function ensureCountBackoffLoaded_() {
     console.error('[PCA] ensureCountBackoffLoaded_ error:', e);
   }
   countBackoffLoaded = true;
+}
+
+// ===== Ack Records Helpers =====
+// Record structure: { state: "pending"|"ack"|"ignored", shownAt: timestamp, deadlineAt: timestamp, source: "auto"|"manual" }
+async function getAckRecord_(dateKey) {
+  try {
+    const st = await chrome.storage.local.get(ACK_RECORDS_KEY);
+    const records = st[ACK_RECORDS_KEY] || {};
+    return records[dateKey] || null;
+  } catch (e) {
+    console.error('[PCA] getAckRecord_ error:', e);
+    return null;
+  }
+}
+
+async function setAckRecord_(dateKey, record) {
+  try {
+    const st = await chrome.storage.local.get(ACK_RECORDS_KEY);
+    const records = st[ACK_RECORDS_KEY] || {};
+    records[dateKey] = record;
+    await chrome.storage.local.set({ [ACK_RECORDS_KEY]: records });
+  } catch (e) {
+    console.error('[PCA] setAckRecord_ error:', e);
+  }
+}
+
+async function getAllAckRecords_() {
+  try {
+    const st = await chrome.storage.local.get(ACK_RECORDS_KEY);
+    return st[ACK_RECORDS_KEY] || {};
+  } catch (e) {
+    console.error('[PCA] getAllAckRecords_ error:', e);
+    return {};
+  }
+}
+
+async function setAllAckRecords_(records) {
+  try {
+    await chrome.storage.local.set({ [ACK_RECORDS_KEY]: records });
+  } catch (e) {
+    console.error('[PCA] setAllAckRecords_ error:', e);
+  }
 }
 
 async function getProfileEmail_() {
@@ -146,47 +186,6 @@ try {
   console.error('[PCA] onSignInChanged addListener error:', e);
 }
 
-// Set toolbar icon from local photo
-function setActionIcon_() {
-  try {
-    chrome.action.setIcon({
-      path: {
-        16: 'pca_cropped_logo.png',
-        32: 'pca_cropped_logo.png'
-      }
-    });
-  } catch (e) {
-    console.warn('[PCA] setActionIcon failed', e);
-  }
-}
-
-function isGmailUrl_(url) {
-  return typeof url === 'string' && url.startsWith('https://mail.google.com/');
-}
-
-// Enable or disable the toolbar icon for a specific tab based on URL and mailbox/profile match
-async function updateActionStateForTab_(tabId, url) {
-  try {
-    if (!isGmailUrl_(url)) {
-      await chrome.action.disable(tabId);
-      await chrome.action.setTitle({ tabId, title: 'Inactive: open your authorized Gmail mailbox' });
-      return;
-    }
-    const profile = await getProfileEmail_();
-    const st = await chrome.storage.local.get(TAB_EMAILS_KEY);
-    const map = st[TAB_EMAILS_KEY] || {};
-    const tabEmail = map[String(tabId)];
-    const match = !!profile && !!tabEmail && profile === tabEmail;
-  await chrome.action.enable(tabId);
-  await chrome.action.setTitle({ tabId, title: match ? 'PCA Untreated Reminder – Force check' : 'Mailbox does not match this Chrome profile' });
-  } catch (e) {
-    // Best-effort: if any error, disable to be safe
-    console.error('[PCA] updateActionStateForTab_ error:', e);
-    try { await chrome.action.disable(tabId); } catch (disableErr) {
-      console.error('[PCA] updateActionStateForTab_ disable fallback error:', disableErr);
-    }
-  }
-}
 
 /**
  * Run on install or update extension
@@ -243,16 +242,23 @@ chrome.alarms.onAlarm.addListener(a => {
   if (a.name?.startsWith('ack-deadline-')) {
     const dateKey = a.name.substring('ack-deadline-'.length);
     (async () => {
-  console.log('[PCA] Deadline reached for', dateKey, 'at', formatShortDateTime_(new Date()));
-      const ackKey = `${ACK_KEY_PREFIX}${dateKey}`;
-      const ignoreKey = `${IGNORE_KEY_PREFIX}${dateKey}`;
-      const st = await chrome.storage.local.get([ackKey, ignoreKey, PENDING_KEY]);
-      if (!st[ackKey] && !st[ignoreKey]) {
-        await chrome.storage.local.set({ [ignoreKey]: true });
-        if (st[PENDING_KEY] === dateKey) await chrome.storage.local.remove(PENDING_KEY);
-  // Close any lingering modals for that date
-  await closeAllGmailModals_();
-  console.log('[PCA] Missed acknowledgement marked for', dateKey);
+      console.log('[PCA] Deadline reached for', dateKey, 'at', formatShortDateTime_(new Date()));
+      const record = await getAckRecord_(dateKey);
+      if (!record) {
+        console.log('[PCA] No record for deadline', dateKey);
+        return;
+      }
+      if (record.state === 'ack') {
+        console.log('[PCA] Already acked, deadline cleanup for', dateKey);
+        await clearAckDeadlineAlarm_(dateKey);
+        return;
+      }
+      if (record.state === 'pending') {
+        // Mark as ignored (missed deadline)
+        record.state = 'ignored';
+        await setAckRecord_(dateKey, record);
+        await closeAllGmailModals_();
+        console.log('[PCA] Missed acknowledgement marked for', dateKey);
       }
     })();
   }
@@ -327,27 +333,34 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
       const todayKey = getTodayKey_();
       const dateKey = msg.dateKey || todayKey;
-      // Accept ACK if it's before the acknowledgement deadline for the given dateKey
       const now = new Date();
-      const deadline = getAckDeadlineFor_(dateKey);
-      if (!(now < deadline)) {
-        console.log('[PCA] ACK ignored: past deadline for', dateKey, 'deadline was', formatShortDateTime_(deadline));
-  // Still close all modals for UX
-  await closeAllGmailModals_();
+      
+      // Get existing record
+      const record = await getAckRecord_(dateKey);
+      if (!record) {
+        console.log('[PCA] ACK ignored: no record for', dateKey);
+        await closeAllGmailModals_();
+        sendResponse({ ok: false, reason: 'no-record' });
+        return;
+      }
+      
+      // Accept ACK if it's before the deadline
+      if (now.getTime() >= record.deadlineAt) {
+        console.log('[PCA] ACK ignored: past deadline for', dateKey, 'deadline was', formatShortDateTime_(new Date(record.deadlineAt)));
+        await closeAllGmailModals_();
         sendResponse({ ok: false, reason: 'late-ack-ignored' });
         return;
       }
-      const ackKey = `${ACK_KEY_PREFIX}${dateKey}`;
-      chrome.storage.local.set({ [ackKey]: true }, async () => {
-  // Broadcast CLOSE_MODAL to all Gmail tabs using sendMessageOrInject_ for reliability
-  await closeAllGmailModals_();
-        // Clear pending for this date and any scheduled acknowledgement deadline alarm
-        const st = await chrome.storage.local.get(PENDING_KEY);
-        if (st[PENDING_KEY] === dateKey) await chrome.storage.local.remove(PENDING_KEY);
-  await clearAckDeadlineAlarm_(dateKey);
-  console.log('[PCA] ACK recorded for', dateKey);
-        sendResponse({ ok: true });
-      });
+      
+      // Update record state to 'ack'
+      record.state = 'ack';
+      await setAckRecord_(dateKey, record);
+      
+      // Close modals and clear alarm
+      await closeAllGmailModals_();
+      await clearAckDeadlineAlarm_(dateKey);
+      console.log('[PCA] ACK recorded for', dateKey);
+      sendResponse({ ok: true });
     })();
     return true;
   }
@@ -402,11 +415,23 @@ async function handleTimeCheckpoint_(force = false) {
   if (!force && now.getHours() < TARGET_HOUR) { console.log(`[PCA] Before target hour (${TARGET_HOUR}); skip`); return; }
 
   const todayKey = getTodayKey_();
-  const ackKey = `${ACK_KEY_PREFIX}${todayKey}`;
-  const ignoreKey = `${IGNORE_KEY_PREFIX}${todayKey}`;
-  const stored = await chrome.storage.local.get([ackKey, ignoreKey]);
-  if (!force && stored[ackKey]) { console.log('[PCA] Already acknowledged today; skip'); return; }
-  if (!force && stored[ignoreKey]) { console.log('[PCA] Already marked ignored today; skip'); return; }
+  const record = await getAckRecord_(todayKey);
+  
+  if (!force && record) {
+    if (record.state === 'ack') {
+      console.log('[PCA] Already acknowledged today; skip');
+      return;
+    }
+    if (record.state === 'ignored') {
+      console.log('[PCA] Already marked ignored today; skip');
+      return;
+    }
+    // state === 'pending': modal already shown, waiting for ACK or deadline
+    if (record.state === 'pending' && now.getTime() < record.deadlineAt) {
+      console.log('[PCA] Modal already shown today, waiting for ACK or deadline; skip');
+      return;
+    }
+  }
 
   // Debug: whose token/profile?
   try {
@@ -444,16 +469,25 @@ async function handleTimeCheckpoint_(force = false) {
   }
 
   if (count > 0) {
-    const auto = !force;
-    await notifyGmailTabs_(count, auto, todayKey);
-    if (auto) {
-      await chrome.storage.local.set({ [PENDING_KEY]: todayKey });
-  const deadline = getAckDeadlineFor_(todayKey);
-  console.log('[PCA] Pending set for', todayKey, 'deadline at', formatShortDateTime_(deadline));
-  await scheduleAckDeadlineAlarm_(todayKey);
+    const source = force ? 'manual' : 'auto';
+    const deadline = getAckDeadlineFor_(todayKey);
+    
+    // Save record with pending state
+    await setAckRecord_(todayKey, {
+      state: 'pending',
+      shownAt: now.getTime(),
+      deadlineAt: deadline.getTime(),
+      source: source
+    });
+    
+    await notifyGmailTabs_(count, !force, todayKey);
+    
+    if (!force) {
+      console.log('[PCA] Pending set for', todayKey, 'deadline at', formatShortDateTime_(deadline));
+      await scheduleAckDeadlineAlarm_(todayKey);
     }
   } else {
-  console.log('[PCA] No _UNTREATED threads; nothing to show');
+    console.log('[PCA] No _UNTREATED threads; nothing to show');
   }
 }
 
@@ -611,40 +645,112 @@ async function clearAckDeadlineAlarm_(dateKey) {
 }
 
 async function runHousekeeping_() {
-  const st = await chrome.storage.local.get([PENDING_KEY]);
-  const pending = st[PENDING_KEY];
-  if (!pending) return;
-
-  const ackKey = `${ACK_KEY_PREFIX}${pending}`;
-  const ignoreKey = `${IGNORE_KEY_PREFIX}${pending}`;
-  const s2 = await chrome.storage.local.get([ackKey, ignoreKey]);
-  if (s2[ackKey] || s2[ignoreKey]) {
-    // Nothing to do; clear stray pending if any
-    await chrome.storage.local.remove(PENDING_KEY).catch((e) => {
-      console.error('[PCA] runHousekeeping_ remove PENDING_KEY error:', e);
-    });
-    await clearAckDeadlineAlarm_(pending).catch((e) => {
-      console.error('[PCA] runHousekeeping_ clearAckDeadlineAlarm_ error:', e);
-    });
-    return;
+  const records = await getAllAckRecords_();
+  const now = Date.now();
+  const DaysAgo = now - 7 * 24 * 60 * 60 * 1000;
+  let cleaned = 0;
+  let updated = false;
+  
+  for (const [dateKey, record] of Object.entries(records)) {
+    // Cleanup old records (> 7 days)
+    if (record.shownAt < DaysAgo) {
+      delete records[dateKey];
+      cleaned++;
+      // Clear any stray alarms
+      try { await chrome.alarms.clear(`ack-deadline-${dateKey}`); } catch (e) {
+        console.error('[PCA] runHousekeeping_ clear old alarm error:', e);
+      }
+      updated = true;
+      continue;
+    }
+    
+    // Handle pending records that passed deadline
+    if (record.state === 'pending' && now >= record.deadlineAt) {
+      record.state = 'ignored';
+      records[dateKey] = record;
+      updated = true;
+      await closeAllGmailModals_();
+      console.log('[PCA] Housekeeping marked missed acknowledgement for', dateKey);
+    }
+    
+    // Ensure pending records have their alarm scheduled
+    if (record.state === 'pending' && now < record.deadlineAt) {
+      await scheduleAckDeadlineAlarm_(dateKey);
+    }
   }
+  
+  if (updated) {
+    await setAllAckRecords_(records);
+  }
+  
+  if (cleaned > 0) {
+    console.log('[PCA] Housekeeping cleaned', cleaned, 'old records');
+  }
+  
+  // Migrate legacy keys (one-time migration)
+  await migrateLegacyAckKeys_();
+}
 
-  const now = new Date();
-  const deadline = getAckDeadlineFor_(pending);
-  if (now >= deadline) {
-    await chrome.storage.local.set({ [ignoreKey]: true });
-    await chrome.storage.local.remove(PENDING_KEY);
-    await clearAckDeadlineAlarm_(pending);
-    // Best-effort cleanup for any legacy EOD alarms (from previous versions)
-    try { await chrome.alarms.clear(`eod-${pending}`); } catch (e) {
-      console.error('[PCA] runHousekeeping_ clear legacy alarm error:', e);
+// One-time migration from old ack-/ignore-/pending- keys to new ack-records
+async function migrateLegacyAckKeys_() {
+  try {
+    const st = await chrome.storage.local.get(null);
+    const records = st[ACK_RECORDS_KEY] || {};
+    const toRemove = [];
+    let migrated = 0;
+    
+    // Check for legacy pending key
+    const pendingDateKey = st['pending-ack-date'];
+    if (pendingDateKey && !records[pendingDateKey]) {
+      const deadline = getAckDeadlineFor_(pendingDateKey);
+      records[pendingDateKey] = {
+        state: 'pending',
+        shownAt: Date.now(),
+        deadlineAt: deadline.getTime(),
+        source: 'auto'
+      };
+      migrated++;
+      toRemove.push('pending-ack-date');
     }
-    await closeAllGmailModals_();
-      console.log('[PCA] Housekeeping marked missed acknowledgement for', pending);
+    
+    // Check for legacy ack-YYYYMMDD and ignore-YYYYMMDD keys
+    for (const key of Object.keys(st)) {
+      if (key.startsWith('ack-') && key !== ACK_RECORDS_KEY) {
+        const dateKey = key.substring(4);
+        if (/^\d{8}$/.test(dateKey) && !records[dateKey]) {
+          const deadline = getAckDeadlineFor_(dateKey);
+          records[dateKey] = {
+            state: 'ack',
+            shownAt: Date.now(),
+            deadlineAt: deadline.getTime(),
+            source: 'auto'
+          };
+          migrated++;
+          toRemove.push(key);
+        }
+      } else if (key.startsWith('ignore-')) {
+        const dateKey = key.substring(7);
+        if (/^\d{8}$/.test(dateKey) && !records[dateKey]) {
+          const deadline = getAckDeadlineFor_(dateKey);
+          records[dateKey] = {
+            state: 'ignored',
+            shownAt: Date.now(),
+            deadlineAt: deadline.getTime(),
+            source: 'auto'
+          };
+          migrated++;
+          toRemove.push(key);
+        }
+      }
     }
-  else {
-    // Ensure the deadline alarm exists and is correctly scheduled
-    await scheduleAckDeadlineAlarm_(pending);
+    
+    if (migrated > 0) {
+      await chrome.storage.local.set({ [ACK_RECORDS_KEY]: records });
+      await chrome.storage.local.remove(toRemove);
+      console.log('[PCA] Migrated', migrated, 'legacy ack/ignore keys');
+    }
+  } catch (e) {
+    console.error('[PCA] migrateLegacyAckKeys_ error:', e);
   }
 }
 
@@ -902,5 +1008,47 @@ async function writeUntreatedCountCacheForEmail_(email, count) {
     await chrome.storage.local.set({ untreatedCountCache: cache });
   } catch (e) {
     console.warn('[PCA] Failed to write untreatedCountCache', e);
+  }
+}
+
+// Set toolbar icon from local photo
+function setActionIcon_() {
+  try {
+    chrome.action.setIcon({
+      path: {
+        16: 'pca_cropped_logo.png',
+        32: 'pca_cropped_logo.png'
+      }
+    });
+  } catch (e) {
+    console.warn('[PCA] setActionIcon failed', e);
+  }
+}
+
+function isGmailUrl_(url) {
+  return typeof url === 'string' && url.startsWith('https://mail.google.com/');
+}
+
+// Enable or disable the toolbar icon for a specific tab based on URL and mailbox/profile match
+async function updateActionStateForTab_(tabId, url) {
+  try {
+    if (!isGmailUrl_(url)) {
+      await chrome.action.disable(tabId);
+      await chrome.action.setTitle({ tabId, title: 'Inactive: open your authorized Gmail mailbox' });
+      return;
+    }
+    const profile = await getProfileEmail_();
+    const st = await chrome.storage.local.get(TAB_EMAILS_KEY);
+    const map = st[TAB_EMAILS_KEY] || {};
+    const tabEmail = map[String(tabId)];
+    const match = !!profile && !!tabEmail && profile === tabEmail;
+  await chrome.action.enable(tabId);
+  await chrome.action.setTitle({ tabId, title: match ? 'PCA Untreated Reminder – Force check' : 'Mailbox does not match this Chrome profile' });
+  } catch (e) {
+    // Best-effort: if any error, disable to be safe
+    console.error('[PCA] updateActionStateForTab_ error:', e);
+    try { await chrome.action.disable(tabId); } catch (disableErr) {
+      console.error('[PCA] updateActionStateForTab_ disable fallback error:', disableErr);
+    }
   }
 }
