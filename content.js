@@ -311,21 +311,30 @@
   // // Use today's ack key for listeners below
 
   // Listen for background trigger (from 4pm alarm or manual click)
-  chrome.runtime.onMessage.addListener(msg => {
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     console.log('[content.js] Received message:', msg?.type);
     if (msg?.type === 'SHOW_MODAL') {
       // Allow showing on mismatch only when explicitly forced by background
       const allowMismatch = !!msg.allowMismatch;
-      if (!mailboxMatchAllowed && !allowMismatch) return;
+      if (!mailboxMatchAllowed && !allowMismatch) {
+        sendResponse({ ok: false, reason: 'mismatch' });
+        return;
+      }
       showModal_(msg.count, !!msg.auto, msg.dateKey, allowMismatch);
+      sendResponse({ ok: true });
+      return;
     }
     if (msg?.type === 'REFRESH_BANNER') {
       // Pull latest cached exact count and update banner
       ensureBanner_();
+      sendResponse({ ok: true });
+      return;
     }
     if (msg?.type === 'CLOSE_MODAL') {
       const overlay = document.getElementById('pca-untreated-overlay');
       if (overlay) overlay.remove();
+      sendResponse({ ok: true });
+      return;
     }
   });
 
@@ -339,9 +348,11 @@
     }
   });
   function showModal_(count, isAuto, dateKey, allowMismatch = false) {
-    if (!mailboxMatchAllowed && !allowMismatch) return; // mismatch: only show if forced
-    if (document.getElementById('pca-untreated-overlay')) return; // avoid duplicates
-
+    
+    if (document.getElementById('pca-untreated-overlay')) {
+      console.log('[content.js] showModal_() modal already shown, skipping');
+      return ; // avoid duplicates
+    }
     const overlay = document.createElement('div');
     overlay.id = 'pca-untreated-overlay';
     Object.assign(overlay.style, {

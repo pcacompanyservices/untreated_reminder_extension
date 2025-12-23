@@ -5,9 +5,8 @@ import { isGmailUrl } from './utils.js';
 
 // ===== Tab Matching =====
 
-export async function getMatchedGmailTabs() {
+export async function getMatchedGmailTabs(profile) {
   const tabs = await chrome.tabs.query({ url: GMAIL_URL_MATCH });
-  const profile = await getProfileEmail();
   const map = await getTabEmailsMap();
   const matchedTabs = [];
   let skipped = 0;
@@ -53,8 +52,8 @@ function trySend(tabId, message) {
 
 // ===== Notifications =====
 
-export async function notifyGmailTabs(count, auto, dateKey) {
-  const { matchedTabs, skipped } = await getMatchedGmailTabs();
+export async function notifyGmailTabs(profile, count, auto, dateKey) {
+  const { matchedTabs, skipped } = await getMatchedGmailTabs(profile);
   let matched = 0;
   
   for (const tab of matchedTabs) {
@@ -68,9 +67,8 @@ export async function notifyGmailTabs(count, auto, dateKey) {
   console.log(`[PCA] Notified tabs matched=${matched} skipped=${skipped}`);
 }
 
-export async function refreshBannersOnGmailTabs() {
+export async function refreshBannersOnGmailTabs(profile) {
   const tabs = await chrome.tabs.query({ url: GMAIL_URL_MATCH });
-  const profile = await getProfileEmail();
   const map = await getTabEmailsMap();
   let matched = 0;
   
@@ -86,8 +84,8 @@ export async function refreshBannersOnGmailTabs() {
   }
 }
 
-export async function closeAllGmailModals() {
-  const { matchedTabs } = await getMatchedGmailTabs();
+export async function closeAllGmailModals(profile) {
+  const { matchedTabs } = await getMatchedGmailTabs(profile);
   for (const tab of matchedTabs) {
     await sendMessageOrInject(tab.id, { type: 'CLOSE_MODAL' });
   }

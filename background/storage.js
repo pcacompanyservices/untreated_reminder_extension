@@ -81,11 +81,11 @@ export async function removeTabEmail(tabId) {
 
 // ===== Count Cache Helpers =====
 
-export async function readUntreatedCountCache(email) {
+export async function readUntreatedCountCache(profile) {
   try {
     const st = await chrome.storage.local.get('untreatedCountCache');
     const cache = st.untreatedCountCache || {};
-    const entry = cache[email];
+    const entry = cache[profile];
     if (!entry) return null;
     return typeof entry.count === 'number' ? entry.count : null;
   } catch (e) {
@@ -94,11 +94,11 @@ export async function readUntreatedCountCache(email) {
   }
 }
 
-export async function writeUntreatedCountCache(email, count) {
+export async function writeUntreatedCountCache(profile, count) {
   try {
     const st = await chrome.storage.local.get('untreatedCountCache');
     const cache = st.untreatedCountCache || {};
-    cache[email] = { count, ts: Date.now() };
+    cache[profile] = { count, ts: Date.now() };
     await chrome.storage.local.set({ untreatedCountCache: cache });
   } catch (e) {
     console.warn('[PCA] writeUntreatedCountCache failed', e);

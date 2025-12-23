@@ -1,0 +1,28 @@
+{
+  // Main records
+  "ack-records": {
+    "YYYYMMDD": { state, shownAt, deadlineAt, source }
+  },
+  
+  // Tab tracking
+  "tabMailboxEmails": {
+    "tabId": "user@gmail.com"
+  },
+  
+  // Count cache
+  "untreatedCountCache": {
+    "user@gmail.com": { count: number, ts: timestamp }
+  },
+  
+  // Profile cache
+  "profileEmailCache": "user@gmail.com",
+  
+  // Backoff timestamps
+  "profileBackoffUntil": timestamp,
+  "countBackoffUntil": timestamp,
+  
+  // Legacy (migrated & removed)
+  "ack-YYYYMMDD": true,        // → migrated to ack-records
+  "ignore-YYYYMMDD": true,     // → migrated to ack-records  
+  "pending-ack-date": "YYYYMMDD" // → migrated to ack-records
+}

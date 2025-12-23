@@ -1,4 +1,4 @@
-import { LABEL_NAME } from './config.js';
+import { LABEL_NAME, TRIAGE_SCAN_DAYS, TRIAGE_MAX_THREADS } from './config.js';
 import { readUntreatedCountCache, writeUntreatedCountCache } from './storage.js';
 
 // ===== State =====
@@ -10,6 +10,7 @@ let profileCacheLoaded = false;
 let countBackoffUntil = 0;
 let countBackoffLoaded = false;
 let untreatedCountInFlight = null;
+let cachedLabelId = null; // Cache _UNTREATED label ID
 
 // ===== Backoff Loading =====
 
@@ -148,6 +149,7 @@ export async function getProfileEmail() {
   return profileFetchPromise;
 }
 
+
 export function clearProfileCache() {
   cachedProfileEmail = null;
   profileFetchAttempted = false;
@@ -158,13 +160,12 @@ export function clearProfileCache() {
 // ===== Untreated Count =====
 
 export async function getUntreatedCount(opts = {}) {
-  const { exact = false, useCache = true } = opts;
-  const email = await getProfileEmail();
-  if (!email) return 0;
+  const { exact = false, useCache = true, profile } = opts;
+  
 
   // Try cache first when allowed
   if (useCache) {
-    const cached = await readUntreatedCountCache(email);
+    const cached = await readUntreatedCountCache(profile);
     if (cached != null && !exact) return cached;
   }
 
@@ -172,7 +173,7 @@ export async function getUntreatedCount(opts = {}) {
   if (untreatedCountInFlight) {
     try {
       const res = await untreatedCountInFlight;
-      if (res && res.email === email) return res.count;
+      if (res && res.profile === profile) return res.count;
     } catch (e) {
       console.error('[PCA] getUntreatedCount untreatedCountInFlight error:', e);
     }
@@ -181,10 +182,10 @@ export async function getUntreatedCount(opts = {}) {
   // Compute exact count now
   untreatedCountInFlight = (async () => {
     const count = await getExactUntreatedCountFromApi();
-    await writeUntreatedCountCache(email, count).catch((e) => {
+    await writeUntreatedCountCache(profile, count).catch((e) => {
       console.error('[PCA] getUntreatedCount writeUntreatedCountCache error:', e);
     });
-    return { email, count };
+    return { profile, count };
   })();
 
   try {
@@ -195,18 +196,27 @@ export async function getUntreatedCount(opts = {}) {
   }
 }
 
-export async function refreshUntreatedCountCache() {
-  const email = await getProfileEmail();
-  if (!email) return;
-  const count = await getUntreatedCount({ exact: true, useCache: false }).catch(async (e) => {
+export async function refreshUntreatedCountCache(profile) {
+  let count;
+
+  try {
+    count = await getUntreatedCount({
+      exact: true,
+      useCache: false,
+      profile
+    });
+  } catch (e) {
     console.warn('[PCA] refresh cache skipped (exact failed)', e);
-    const c = await readUntreatedCountCache(email);
-    return typeof c === 'number' ? c : 0;
-  });
-  if (typeof count === 'number') {
-    await writeUntreatedCountCache(email, count);
+    const c = await readUntreatedCountCache(profile);
+    count = typeof c === 'number' ? c : 0;
   }
-  console.log('[PCA] Hourly exact _UNTREATED count cached for', email, '=', count);
+
+  if (typeof count === 'number') {
+    await writeUntreatedCountCache(profile, count);
+  }
+
+  console.log('[PCA] Exact _UNTREATED count cached for', profile, '=', count);
+  return count;
 }
 
 async function getExactUntreatedCountFromApi() {
@@ -283,3 +293,263 @@ export async function getUntreatedEstimate() {
     return 0;
   }
 }
+
+// ===== Triage: Label Emails as _UNTREATED =====
+
+/**
+ * Get or create _UNTREATED label, returns label ID
+ */
+async function getOrCreateUntreatedLabelId() {
+  if (cachedLabelId) return cachedLabelId;
+  
+  const token = await getToken();
+  
+  // List all labels to find _UNTREATED
+  const listRes = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/labels', {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  
+  if (listRes.ok) {
+    try {
+      const data = await listRes.json();
+      const existing = (data.labels || []).find(l => l.name === LABEL_NAME);
+      if (existing) {
+        cachedLabelId = existing.id;
+        return cachedLabelId;
+      }
+    } catch (e) {
+      console.warn('[PCA] getOrCreateUntreatedLabelId list parse error:', e);
+    }
+  }
+  
+  // Create label if not exists
+  const createRes = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/labels', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      name: LABEL_NAME,
+      labelListVisibility: 'labelShow',
+      messageListVisibility: 'show'
+    })
+  });
+  
+  if (createRes.ok) {
+    try {
+      const created = await createRes.json();
+      cachedLabelId = created.id;
+      console.log('[PCA] Created label', LABEL_NAME, 'with ID', cachedLabelId);
+      return cachedLabelId;
+    } catch (e) {
+      console.warn('[PCA] getOrCreateUntreatedLabelId create parse error:', e);
+    }
+  }
+  
+  throw new Error(`Failed to get/create label ${LABEL_NAME}`);
+}
+
+/**
+ * Search threads by query with pagination, returns array of thread IDs
+ */
+async function searchThreadIds(query, maxResults = TRIAGE_MAX_THREADS) {
+  const token = await getToken();
+  const threadIds = [];
+  let pageToken;
+  
+  do {
+    const params = new URLSearchParams({
+      maxResults: String(Math.min(100, maxResults - threadIds.length)),
+      q: query
+    });
+    if (pageToken) params.set('pageToken', pageToken);
+    
+    const url = `https://gmail.googleapis.com/gmail/v1/users/me/threads?${params.toString()}&fields=nextPageToken,threads/id`;
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      console.warn('[PCA] searchThreadIds failed:', res.status, txt);
+      break;
+    }
+    
+    // Get response text first to check if empty
+    const text = await res.text().catch(() => '');
+    if (!text || !text.trim()) {
+      // Empty response = no results
+      break;
+    }
+    
+    let data = {};
+    try {
+      data = JSON.parse(text);
+    } catch (e) {
+      console.warn('[PCA] searchThreadIds parse error:', e, 'text:', text.substring(0, 100));
+      break;
+    }
+    
+    const threads = data.threads || [];
+    if (threads.length === 0) break; // No more results
+    
+    for (const t of threads) {
+      threadIds.push(t.id);
+      if (threadIds.length >= maxResults) break;
+    }
+    
+    pageToken = data.nextPageToken;
+  } while (pageToken && threadIds.length < maxResults);
+  
+  return threadIds;
+}
+
+/**
+ * Add label to a single thread
+ */
+async function addLabelToThread(threadId, labelId) {
+  const token = await getToken();
+  const url = `https://gmail.googleapis.com/gmail/v1/users/me/threads/${threadId}/modify`;
+  
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ addLabelIds: [labelId] })
+  });
+  
+  return res.ok;
+}
+
+/**
+ * Remove label from a single thread
+ */
+async function removeLabelFromThread(threadId, labelId) {
+  const token = await getToken();
+  const url = `https://gmail.googleapis.com/gmail/v1/users/me/threads/${threadId}/modify`;
+  
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ removeLabelIds: [labelId] })
+  });
+  
+  return res.ok;
+}
+
+/**
+ * Get thread details (labels, messages)
+ */
+async function getThreadDetails(threadId) {
+  const token = await getToken();
+  const url = `https://gmail.googleapis.com/gmail/v1/users/me/threads/${threadId}?format=metadata&metadataHeaders=From`;
+  
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) return null;
+  
+  try {
+    return await res.json();
+  } catch (e) {
+    console.warn('[PCA] getThreadDetails parse error:', e);
+    return null;
+  }
+}
+
+/**
+ * Check if thread is fully read (no UNREAD label on any message)
+ */
+function isThreadFullyRead(threadData) {
+  if (!threadData?.messages) return true;
+  return !threadData.messages.some(m => (m.labelIds || []).includes('UNREAD'));
+}
+
+/**
+ * Check if thread has any user label other than _UNTREATED
+ */
+function hasOtherUserLabel(threadData, untreatedLabelId) {
+  if (!threadData?.messages) return false;
+  
+  // System labels start with uppercase or are specific IDs
+  const systemLabels = new Set([
+    'INBOX', 'SENT', 'DRAFT', 'SPAM', 'TRASH', 'UNREAD', 'STARRED',
+    'IMPORTANT', 'CATEGORY_PERSONAL', 'CATEGORY_SOCIAL', 'CATEGORY_PROMOTIONS',
+    'CATEGORY_UPDATES', 'CATEGORY_FORUMS'
+  ]);
+  
+  for (const msg of threadData.messages) {
+    for (const labelId of (msg.labelIds || [])) {
+      if (labelId !== untreatedLabelId && !systemLabels.has(labelId)) {
+        return true; // Has another user label
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Main triage function: label unread/unlabeled emails as _UNTREATED
+ * Similar to GAS triageMailboxToUNTREATED()
+ */
+export async function triageMailboxToUNTREATED() {
+  // const email = await getProfileEmail();
+  // if (!email) {
+  //   console.log('[PCA] Triage skipped: no profile email');
+  //   return { labeled: 0, cleaned: 0 };
+  // }
+  
+  await ensureCountBackoffLoaded();
+  if (Date.now() < countBackoffUntil) {
+    console.log('[PCA] Triage skipped: in backoff period');
+    return { labeled: 0, cleaned: 0 };
+  }
+  
+  const labelId = await getOrCreateUntreatedLabelId();
+  const dateFilter = `newer_than:${TRIAGE_SCAN_DAYS}d`;
+  
+  // 1) Collect: unread OR unlabeled in recent window
+  const queries = [
+    `is:unread -in:spam -in:trash ${dateFilter}`,
+    `has:nouserlabels -in:spam -in:trash ${dateFilter}`
+  ];
+  
+  const seen = new Set();
+  let labeled = 0;
+  
+  for (const q of queries) {
+    const threadIds = await searchThreadIds(q, TRIAGE_MAX_THREADS);
+    for (const id of threadIds) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      
+      const ok = await addLabelToThread(id, labelId);
+      if (ok) labeled++;
+    }
+  }
+  
+  // 2) Cleanup: remove _UNTREATED if (fully read) AND (has other user label)
+  const untreatedThreadIds = await searchThreadIds(
+    `label:${LABEL_NAME} -in:spam -in:trash ${dateFilter}`,
+    TRIAGE_MAX_THREADS
+  );
+  
+  let cleaned = 0;
+  for (const id of untreatedThreadIds) {
+    const details = await getThreadDetails(id);
+    if (!details) continue;
+    
+    const fullyRead = isThreadFullyRead(details);
+    const hasOther = hasOtherUserLabel(details, labelId);
+    
+    if (fullyRead && hasOther) {
+      const ok = await removeLabelFromThread(id, labelId);
+      if (ok) cleaned++;
+    }
+  }
+  
+  return { labeled, cleaned };
+}
+
