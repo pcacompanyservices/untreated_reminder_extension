@@ -91,6 +91,28 @@ export async function closeAllGmailModals(profile) {
   }
 }
 
+/**
+ * Show loading modal on all matched Gmail tabs
+ * @param {string} profile - Profile email to match
+ * @returns {Promise<number>} Number of tabs notified
+ */
+export async function showLoadingModalOnGmailTabs(profile) {
+  const { matchedTabs } = await getMatchedGmailTabs(profile);
+  let count = 0;
+  
+  for (const tab of matchedTabs) {
+    try {
+      const ok = await sendMessageOrInject(tab.id, { type: 'SHOW_LOADING_MODAL' });
+      if (ok) count++;
+    } catch (e) {
+      console.warn('[PCA] showLoadingModal failed for tab', tab.id, e);
+    }
+  }
+  
+  console.log('[PCA] Showed loading modal on', count, 'Gmail tabs');
+  return count;
+}
+
 // ===== Action State =====
 
 export async function updateActionStateForTab(tabId, url) {

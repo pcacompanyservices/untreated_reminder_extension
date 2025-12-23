@@ -3,7 +3,7 @@ import { getTodayKey, isWeekend, isWithinWorkingHours, formatShortDateTime, getA
 import { getAckRecord, setAckRecord, getAllAckRecords, setAllAckRecords, setTabEmail, removeTabEmail, readUntreatedCountCache } from './storage.js';
 import { getProfileEmail, getUntreatedCount, getUntreatedEstimate, ensureTokenInteractive, clearProfileCache, refreshUntreatedCountCache, triageMailboxToUNTREATED } from './gmail-api.js';
 import { scheduleNextAlarm, scheduleHourlyCount, scheduleAckDeadlineAlarm, clearAckDeadlineAlarm } from './alarm-handlers.js';
-import { getMatchedGmailTabs, notifyGmailTabs, refreshBannersOnGmailTabs, closeAllGmailModals, updateActionStateForTab, sendMessageOrInject } from './tab-manager.js';
+import { getMatchedGmailTabs, notifyGmailTabs, refreshBannersOnGmailTabs, closeAllGmailModals, updateActionStateForTab, sendMessageOrInject, showLoadingModalOnGmailTabs } from './tab-manager.js';
 
 console.log('[PCA] SW loaded. Ext ID:', chrome.runtime.id);
 
@@ -394,6 +394,11 @@ async function handleTimeCheckpoint(profile, force = false) {
     }
   }
 
+  // Show loading modal immediately (before triage/refresh) when forced
+  if (force) {
+    await showLoadingModalOnGmailTabs(profile);
+  }
+
   // Debug: log profile info
   try {
     const info = await chrome.identity.getProfileUserInfo();
@@ -413,6 +418,8 @@ async function handleTimeCheckpoint(profile, force = false) {
       const estimate = await getUntreatedEstimate().catch(() => 0);
       if (estimate <= 0) {
         console.log('[PCA] No _UNTREATED by estimate; nothing to show');
+        // Close loading modal if no results
+        if (force) await closeAllGmailModals(profile);
         return;
       }
       finalCount = estimate;
@@ -440,6 +447,8 @@ async function handleTimeCheckpoint(profile, force = false) {
     }
   } else {
     console.log('[PCA] No _UNTREATED threads; nothing to show');
+    // Close loading modal if no untreated
+    if (force) await closeAllGmailModals(profile);
   }
 }
 

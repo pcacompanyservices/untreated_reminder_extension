@@ -313,6 +313,11 @@
   // Listen for background trigger (from 4pm alarm or manual click)
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     console.log('[content.js] Received message:', msg?.type);
+    if (msg?.type === 'SHOW_LOADING_MODAL') {
+      showLoadingModal_();
+      sendResponse({ ok: true });
+      return;
+    }
     if (msg?.type === 'SHOW_MODAL') {
       // Allow showing on mismatch only when explicitly forced by background
       const allowMismatch = !!msg.allowMismatch;
@@ -347,12 +352,76 @@
       if (overlay) overlay.remove();
     }
   });
-  function showModal_(count, isAuto, dateKey, allowMismatch = false) {
-    
-    if (document.getElementById('pca-untreated-overlay')) {
-      console.log('[content.js] showModal_() modal already shown, skipping');
-      return ; // avoid duplicates
+
+  /**
+   * Show loading modal with spinner
+   */
+  function showLoadingModal_() {
+    // Remove existing modal if any
+    const existing = document.getElementById('pca-untreated-overlay');
+    if (existing) existing.remove();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'pca-untreated-overlay';
+    Object.assign(overlay.style, {
+      position: 'fixed',
+      inset: '0',
+      background: 'rgba(0,0,0,0.6)',
+      zIndex: '2147483647',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center'
+    });
+
+    const box = document.createElement('div');
+    Object.assign(box.style, {
+      background: '#fff',
+      padding: '32px 48px',
+      borderRadius: '12px',
+      boxShadow: '0 10px 30px rgba(0,0,0,0.2)',
+      fontFamily: 'Arial, sans-serif',
+      textAlign: 'center',
+      minWidth: '300px'
+    });
+
+    // Add spinner animation style if not exists
+    if (!document.getElementById('pca-spinner-style')) {
+      const style = document.createElement('style');
+      style.id = 'pca-spinner-style';
+      style.textContent = `
+        @keyframes pca-spin {
+          to { transform: rotate(360deg); }
+        }
+      `;
+      document.head.appendChild(style);
     }
+
+    box.innerHTML = `
+      <div style="margin-bottom: 16px;">
+        <div style="
+          width: 40px;
+          height: 40px;
+          border: 4px solid #e0e0e0;
+          border-top-color: #C1272D;
+          border-radius: 50%;
+          animation: pca-spin 1s linear infinite;
+          margin: 0 auto;
+        "></div>
+      </div>
+      <div style="font-size: 16px; color: #333; font-weight: 600;">Đang kiểm tra email...</div>
+      <div style="font-size: 14px; color: #666; margin-top: 4px;">Checking emails...</div>
+    `;
+
+    overlay.appendChild(box);
+    document.documentElement.appendChild(overlay);
+    console.log('[content.js] showLoadingModal_() displayed');
+  }
+
+  function showModal_(count, isAuto, dateKey, allowMismatch = false) {
+    // Remove existing modal (including loading modal) before showing result
+    const existing = document.getElementById('pca-untreated-overlay');
+    if (existing) existing.remove();
+
     const overlay = document.createElement('div');
     overlay.id = 'pca-untreated-overlay';
     Object.assign(overlay.style, {
