@@ -549,7 +549,115 @@ export async function triageMailboxToUNTREATED() {
       if (ok) cleaned++;
     }
   }
-  
+  await markAllUntreatedAsUnread();
   return { labeled, cleaned };
 }
 
+/**
+ * Mark only the latest message in each _UNTREATED thread as UNREAD,
+ * and mark all older messages as READ
+ * @returns {Promise<{markedUnread: number, markedRead: number, threadCount: number}>}
+ */
+export async function markAllUntreatedAsUnread() {
+  await ensureCountBackoffLoaded();
+  if (Date.now() < countBackoffUntil) {
+    console.log('[PCA] markAllUntreatedAsUnread skipped: in backoff period');
+    return { markedUnread: 0, markedRead: 0, threadCount: 0 };
+  }
+  
+  const token = await getToken();
+ 
+  // Search for all _UNTREATED threads
+  const threadIds = await searchThreadIds(
+    `label:${LABEL_NAME} -in:spam -in:trash`,
+    500 // reasonable cap
+  );
+  
+  if (threadIds.length === 0) {
+    console.log('[PCA] markAllUntreatedAsUnread: no _UNTREATED threads found');
+    return { markedUnread: 0, markedRead: 0, threadCount: 0 };
+  }
+  
+  // Collect message IDs to mark as UNREAD (latest) and READ (older)
+  const latestMsgIds = [];  // Will be marked UNREAD
+  const olderMsgIds = [];   // Will be marked READ (remove UNREAD)
+  
+  for (const threadId of threadIds) {
+    const details = await getThreadDetails(threadId);
+    if (!details?.messages || details.messages.length === 0) continue;
+    
+    // Messages are ordered oldest -> newest, so last one is latest
+    const messages = details.messages;
+    const latestMsg = messages[messages.length - 1];
+    
+    // Latest message -> mark UNREAD (if not already)
+    if (!(latestMsg.labelIds || []).includes('UNREAD')) {
+      latestMsgIds.push(latestMsg.id);
+    }
+    
+    // Older messages -> mark READ (remove UNREAD if present)
+    for (let i = 0; i < messages.length - 1; i++) {
+      const msg = messages[i];
+      if ((msg.labelIds || []).includes('UNREAD')) {
+        olderMsgIds.push(msg.id);
+      }
+    }
+  }
+  
+  const batchSize = 1000;
+  let markedUnread = 0;
+  let markedRead = 0;
+  
+  // Batch modify: add UNREAD to latest messages
+  for (let i = 0; i < latestMsgIds.length; i += batchSize) {
+    const batch = latestMsgIds.slice(i, i + batchSize);
+    
+    const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/batchModify', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        ids: batch,
+        addLabelIds: ['UNREAD'],
+        removeLabelIds: []
+      })
+    });
+    
+    if (res.ok) {
+      markedUnread += batch.length;
+    } else {
+      const txt = await res.text().catch(() => '');
+      console.warn('[PCA] markAllUntreatedAsUnread add UNREAD failed:', res.status, txt);
+    }
+  }
+  
+  // Batch modify: remove UNREAD from older messages
+  for (let i = 0; i < olderMsgIds.length; i += batchSize) {
+    const batch = olderMsgIds.slice(i, i + batchSize);
+    
+    const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/batchModify', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        ids: batch,
+        addLabelIds: [],
+        removeLabelIds: ['UNREAD']
+      })
+    });
+    
+    if (res.ok) {
+      markedRead += batch.length;
+    } else {
+      const txt = await res.text().catch(() => '');
+      console.warn('[PCA] markAllUntreatedAsUnread remove UNREAD failed:', res.status, txt);
+    }
+  }
+  
+  console.log('[PCA] markAllUntreatedAsUnread:', markedUnread, 'latest marked UNREAD,', markedRead, 'older marked READ in', threadIds.length, 'threads');
+  return { markedUnread, markedRead, threadCount: threadIds.length };
+}
