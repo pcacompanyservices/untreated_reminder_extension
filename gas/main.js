@@ -8,7 +8,7 @@ const WORK_END_HOUR        = 18;    // exclusive
 const DAILY_REMINDER_HOUR  = 16;    // 4 PM
 const SCAN_WINDOW_DAYS     = 5;     // triage window: 5 days
 const SCAN_WINDOW_HOURLY   = 3;     // scan for 3 days on hourly run
-const ENFORCE_RECENT_QUERY = `label:${UNTREATED_LABEL} newer_than:${SCAN_WINDOW_HOURLY}d -in:trash -in:spam`;
+const ENFORCE_RECENT_QUERY = `label:${UNTREATED_LABEL} newer_than:${SCAN_WINDOW_DAYS}d -in:trash -in:spam`;
 const MAX_ENFORCE_THREADS  = 500;   // safety cap per run to avoid quota spikes
 
 /***** GMAIL API UNIT ESTIMATOR (per-run) *****/
@@ -209,11 +209,13 @@ function cleanupUNTREATED_(untreatedLabel) {
 /***** ENFORCEMENT: PIVOT MODE + PER-MESSAGE LABEL PROPAGATION (ONLY _PROCESSING / _FOLLOW-UP, BATCHED) *****/
 /**
  * Process only recent _UNTREATED threads (quota-friendly).
- * Always keep ONLY the latest message in the thread as UNREAD.
- *  - Clear UNREAD from all messages except the latest.
- *  - Set UNREAD on the latest message.
- *  - If the thread has _PROCESSING and/or _FOLLOW-UP, add those labels to the latest message
- *    (so sidebar counters reflect the current unread item).
+ * Behavior (pivot mode, unchanged):
+ *  - Find newest unread message (pivot). If none unread, pivot = last message.
+ *  - Mark ALL messages BEFORE pivot as READ.
+ *  - For messages pivot..END:
+ *      * Add UNREAD.
+ *      * If the thread has _PROCESSING and/or _FOLLOW-UP, add those labels to the messages
+ *        (so their sidebar counters pop when the thread has unread).
  * Notes: uses batchModify (≤2 calls per thread).
  */
 function enforceUnreadAndLabelsRecent_(untreatedLabel) {
@@ -229,11 +231,13 @@ function enforceUnreadAndLabelsRecent_(untreatedLabel) {
     const msgs = thread.getMessages(); // oldest -> newest
     if (!msgs.length) return;
 
-    // Latest message only
-    const latestIdx = msgs.length - 1;
-    const latestId = msgs[latestIdx].getId();
-    const removeIds = [];
-    for (let i = 0; i < latestIdx; i++) removeIds.push(msgs[i].getId());
+    const pivot = newestUnreadPivotIndex_(msgs);
+
+    // Collect message IDs
+    const beforeIds = [];
+    const afterIds  = [];
+    for (let i = 0; i < pivot; i++) beforeIds.push(msgs[i].getId());
+    for (let i = pivot; i < msgs.length; i++) afterIds.push(msgs[i].getId());
 
     // Determine if the thread has either/both special labels
     const threadLabelNames = thread.getLabels().map(l => l.getName());
@@ -245,24 +249,26 @@ function enforceUnreadAndLabelsRecent_(untreatedLabel) {
       addSpecialIds.push(labelIdByName[FOLLOWUP_LABEL]);
     }
 
-    // 1) All messages except latest => ensure READ (remove UNREAD)
-    if (removeIds.length) {
+    // 1) Before pivot => READ (remove UNREAD in one batch; idempotent)
+    if (beforeIds.length) {
       Gmail.Users.Messages.batchModify(
-        { ids: removeIds, addLabelIds: [], removeLabelIds: ['UNREAD'] },
+        { ids: beforeIds, addLabelIds: [], removeLabelIds: ['UNREAD'] },
         'me'
       );
       addApiUnits_(50); // batchModify
-      touched += removeIds.length;
+      touched += beforeIds.length;
     }
 
-    // 2) Latest message => UNREAD + (optional) _PROCESSING/_FOLLOW-UP
-    const addLabels = addSpecialIds.length ? ['UNREAD', ...addSpecialIds] : ['UNREAD'];
-    Gmail.Users.Messages.batchModify(
-      { ids: [latestId], addLabelIds: addLabels, removeLabelIds: [] },
-      'me'
-    );
-    addApiUnits_(50); // batchModify
-    touched += 1;
+    // 2) Pivot..end => UNREAD + (optional) _PROCESSING/_FOLLOW-UP in one batch
+    if (afterIds.length) {
+      const addLabels = addSpecialIds.length ? ['UNREAD', ...addSpecialIds] : ['UNREAD'];
+      Gmail.Users.Messages.batchModify(
+        { ids: afterIds, addLabelIds: addLabels, removeLabelIds: [] },
+        'me'
+      );
+      addApiUnits_(50); // batchModify
+      touched += afterIds.length;
+    }
   });
 
   return touched;
